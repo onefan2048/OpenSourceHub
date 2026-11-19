@@ -1,0 +1,3 @@
+import "./globals.css";import { Shell } from "@/components/Shell";import { prisma } from "@/lib/db";
+export const metadata={title:"OpenSource Hub",description:"开源软件更新中心"};export const dynamic="force-dynamic";
+export default async function RootLayout({children}:{children:React.ReactNode}){const unread=await prisma.notification.count({where:{channel:"web",readAt:null}}).catch(()=>0);return <html lang="zh-CN" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{__html:`try{if(localStorage.getItem('theme')==='dark'||(!localStorage.getItem('theme')&&matchMedia('(prefers-color-scheme: dark)').matches))document.documentElement.classList.add('dark')}catch(e){}`}}/></head><body><Shell unread={unread}>{children}</Shell></body></html>}

@@ -1,0 +1,53 @@
+name: OpenSourceHub
+options:
+  bundleIdPrefix: com.opensourcehub
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.0"
+
+packages:
+  OpenSourceHubCore:
+    path: .
+
+targets:
+  OpenSourceHub:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sources/OpenSourceHubApp
+      - path: Resources/Assets.xcassets
+    dependencies:
+      - package: OpenSourceHubCore
+        product: OpenSourceHubCore
+    info:
+      path: Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.opensourcehub.ios
+        PRODUCT_NAME: OpenSourceHub
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.9"
+        ARCHS: arm64
+        ONLY_ACTIVE_ARCH: NO
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
+        ENABLE_BITCODE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_OPTIMIZATION: space
+      configs:
+        Release:
+          SWIFT_OPTIMIZATION_LEVEL: -Osize
+          SWIFT_COMPILATION_MODE: wholemodule
+          GCC_OPTIMIZATION_LEVEL: s
+          DEAD_CODE_STRIPPING: YES
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: all
+          COPY_PHASE_STRIP: YES
+          DEBUG_INFORMATION_FORMAT: dwarf
+          ENABLE_TESTABILITY: NO
+          LLVM_LTO: YES_THIN

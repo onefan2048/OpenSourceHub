@@ -1,0 +1,35 @@
+name: Build iOS IPA (OpenSource Hub)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - "ios/**"
+      - ".github/workflows/build-ios-ipa.yml"
+
+jobs:
+  build-ipa:
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run OpenSourceHubCore unit tests
+        working-directory: ios
+        run: swift test
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build minimal iOS .ipa
+        run: |
+          chmod +x ios/build-ipa.sh
+          ./ios/build-ipa.sh
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenSourceHub-iOS-1.0.0-ipa
+          path: dist/OpenSourceHub-iOS-1.0.0-unsigned.ipa
+          if-no-files-found: error

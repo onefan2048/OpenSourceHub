@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Build outputs & caches (do not push large binaries)
+build/
+build-cache/
+dist/
+
+# Next.js / Node
+app/node_modules/
+app/.next/
+app/data/
+app/.env
+
+# Swift / Xcode
+ios/.build/
+ios/OpenSourceHub.xcodeproj/
+*.xcuserstate
+DerivedData/

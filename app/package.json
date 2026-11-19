@@ -1,0 +1,49 @@
+{
+  "name": "opensource-hub",
+  "version": "1.0.0",
+  "description": "OpenSource Hub：GitHub 开源软件源管理、版本监控与多平台资产聚合",
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "node scripts/start.cjs",
+    "worker": "tsx src/worker/index.ts",
+    "db:push": "prisma db push --skip-generate",
+    "db:generate": "prisma generate",
+    "test": "sh scripts/test.sh",
+    "typecheck": "tsc --noEmit",
+    "sync:once": "tsx scripts/sync-once.ts",
+    "postbuild": "mkdir -p .next/standalone/.next && cp -r .next/static .next/standalone/.next/"
+  },
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "clsx": "^2.1.1",
+    "katex": "0.16.47",
+    "lucide-react": "^1.73.0",
+    "next": "^15.5.29",
+    "nodemailer": "^10.6.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "7.0.1",
+    "rehype-raw": "7.0.0",
+    "rehype-sanitize": "6.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "6.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.5",
+    "@types/node": "^26.6.6",
+    "@types/nodemailer": "^8.0.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "postcss": "^8.5.33",
+    "prisma": "^6.19.3",
+    "tailwindcss": "^4.3.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.0"
+  },
+  "private": true
+}

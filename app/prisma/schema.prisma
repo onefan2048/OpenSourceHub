@@ -1,0 +1,497 @@
+// OpenSource Hub 数据库 Schema
+// SQLite 起步；所有字段均使用 Prisma 通用类型，可将 provider 切换为 postgresql 迁移。
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["darwin-arm64"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// 仓库基础信息（一个仓库只有一条记录）
+model Repository {
+  id                  Int       @id @default(autoincrement())
+  provider            String    @default("github") // github | gitlab | codeberg（预留）
+  providerRepoId      String? // GitHub 仓库数字 ID，用于识别改名/转移
+  owner               String
+  name                String
+  fullName            String
+  fullNameKey         String // 小写 owner/name，用于去重
+  description         String?
+  homepage            String?
+  htmlUrl             String
+  avatarUrl           String?
+  logoUrl             String?
+  stars               Int       @default(0)
+  forks               Int       @default(0)
+  watchers            Int       @default(0)
+  license             String?
+  language            String?
+  topics              String    @default("[]") // JSON 数组
+  defaultBranch       String?
+  isArchived          Boolean   @default(false)
+  isFork              Boolean   @default(false)
+  repoCreatedAt       DateTime?
+  repoUpdatedAt       DateTime?
+  pushedAt            DateTime?
+  hasReleases         Boolean   @default(false)
+  hasTags             Boolean   @default(false)
+  hasAssets           Boolean   @default(false)
+  platforms           String    @default("[]") // JSON 数组：macos/windows/linux/ios/android
+  fileTypes           String    @default("[]") // JSON 数组：dmg/exe/apk...
+  status              String    @default("pending") // 见 src/lib/status.ts
+  accessible          Boolean   @default(true)
+  lastError           String?
+  headSha             String?
+  totalCommits        Int?
+  latestVersion       String?
+  latestVersionSource String? // release | tag | commit | changelog
+  latestVersionAt     DateTime?
+  latestActivityAt    DateTime?
+  readme              String?
+  readmeSha           String?
+  rootTree            String? // JSON：根目录条目
+  watchedFiles        String    @default("[]") // 用户自定义监控文件路径 JSON
+  pollIntervalMinutes Int? // 为空则使用全局设置
+  paused              Boolean   @default(false)
+  baselineEstablished Boolean   @default(false)
+  baselineAt          DateTime?
+  initialCommitCount  Int? // 为空则使用全局设置
+  notifyEnabled       Boolean   @default(true)
+  notifyRelease       Boolean   @default(true)
+  notifyPrerelease    Boolean   @default(false)
+  notifyTag           Boolean   @default(false)
+  notifyCommit        Boolean   @default(false)
+  notifyChangelog     Boolean   @default(false)
+  lastSyncedAt        DateTime?
+  lastSyncStatus      String? // success | failed | partial
+  lastSyncDurationMs  Int?
+  nextSyncAt          DateTime?
+  consecutiveFailures Int       @default(0)
+  categoryId          Int? // 所属分类（类似书签文件夹，一个软件源属于一个分类，可为空=未分类）
+  addedAt             DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  category         Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  releases         Release[]
+  tags             Tag[]
+  commits          Commit[]
+  assets           Asset[]
+  versionEvents    VersionEvent[]
+  changelogEntries ChangelogEntry[]
+  trackedFiles     TrackedFile[]
+  syncTasks        SyncTask[]
+  syncLogs         SyncLog[]
+  notifications    Notification[]
+  issues           Issue[]
+  discussions      Discussion[]
+  repoLabels       RepoLabel[]
+  discussionCats   DiscussionCategory[]
+  communitySyncs   CommunitySync[]
+
+  @@unique([provider, fullNameKey])
+  @@unique([provider, providerRepoId])
+  @@index([nextSyncAt])
+  @@index([categoryId])
+  @@map("repositories")
+}
+
+/// 软件源分类（类比浏览器多级书签文件夹）
+model Category {
+  id        Int      @id @default(autoincrement())
+  name      String
+  parentId  Int?
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  parent       Category?    @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children     Category[]   @relation("CategoryTree")
+  repositories Repository[]
+
+  @@index([parentId])
+  @@map("categories")
+}
+
+/// GitHub Release 历史版本
+model Release {
+  id              Int       @id @default(autoincrement())
+  repositoryId    Int
+  providerId      String // GitHub release id
+  tagName         String
+  name            String?
+  body            String?
+  isPrerelease    Boolean   @default(false)
+  isDraft         Boolean   @default(false)
+  isLatest        Boolean   @default(false)
+  publishedAt     DateTime?
+  createdAtRemote DateTime?
+  htmlUrl         String
+  zipballUrl      String?
+  tarballUrl      String?
+  authorLogin     String?
+  targetCommitish String?
+  assetCount      Int       @default(0)
+  firstSeenAt     DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  assets     Asset[]
+
+  @@unique([repositoryId, providerId])
+  @@index([repositoryId, publishedAt])
+  @@map("releases")
+}
+
+/// Release 附件
+model Asset {
+  id              Int       @id @default(autoincrement())
+  repositoryId    Int
+  releaseId       Int
+  providerId      String
+  name            String
+  label           String?
+  contentType     String?
+  size            Int       @default(0)
+  downloadCount   Int       @default(0)
+  downloadUrl     String
+  sha256          String? // 仅来自 GitHub API digest 字段
+  platform        String // macos | windows | linux | ios | android | cross | unknown
+  arch            String // arm64 | x64 | x86 | universal | armv7 | riscv64 | unknown
+  fileType        String // dmg / exe / apk / tar.gz / binary ...
+  kind            String // installer | archive | package | binary | metadata | other
+  confidence      String // high | medium | low：识别可信度（不代表一定可安装）
+  createdAtRemote DateTime?
+  updatedAtRemote DateTime?
+  firstSeenAt     DateTime  @default(now())
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  release    Release    @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+
+  @@unique([releaseId, providerId])
+  @@index([repositoryId, platform])
+  @@map("assets")
+}
+
+/// Git Tag（不等同于 Release）
+model Tag {
+  id          Int       @id @default(autoincrement())
+  repositoryId Int
+  name        String
+  commitSha   String
+  commitDate  DateTime?
+  zipballUrl  String?
+  tarballUrl  String?
+  firstSeenAt DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, name])
+  @@map("tags")
+}
+
+/// 默认分支 Commit 记录
+model Commit {
+  id           Int      @id @default(autoincrement())
+  repositoryId Int
+  sha          String
+  shortSha     String
+  message      String
+  authorName   String?
+  authorLogin  String?
+  authorAvatar String?
+  committedAt  DateTime?
+  htmlUrl      String
+  branch       String?
+  firstSeenAt  DateTime @default(now())
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, sha])
+  @@index([repositoryId, committedAt])
+  @@map("commits")
+}
+
+/// 被监控的文件（Changelog、版本文件、自定义文件）
+model TrackedFile {
+  id            Int       @id @default(autoincrement())
+  repositoryId  Int
+  path          String
+  kind          String // changelog | version_file | custom
+  lastSha       String?
+  lastVersion   String?
+  lastCheckedAt DateTime?
+  lastChangedAt DateTime?
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, path])
+  @@map("tracked_files")
+}
+
+/// Changelog 解析结果
+model ChangelogEntry {
+  id           Int       @id @default(autoincrement())
+  repositoryId Int
+  filePath     String
+  version      String
+  title        String
+  body         String?
+  entryDate    String?
+  firstSeenAt  DateTime  @default(now())
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, filePath, version])
+  @@map("changelog_entries")
+}
+
+/// 统一版本事件（每条保留原始来源类型）
+model VersionEvent {
+  id           Int      @id @default(autoincrement())
+  repositoryId Int
+  sourceType   String // release | tag | commit | changelog
+  eventType    String // release_published | prerelease_published | tag_created | commit_pushed | changelog_entry | version_file_changed | file_changed
+  sourceKey    String // release id / tag 名 / commit sha / 文件路径@版本
+  version      String?
+  title        String
+  url          String?
+  occurredAt   DateTime?
+  isBaseline   Boolean  @default(false) // 首次同步建立的历史基线，不推送通知
+  detectedAt   DateTime @default(now())
+
+  repository    Repository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  notifications Notification[]
+
+  @@unique([repositoryId, sourceType, sourceKey])
+  @@index([detectedAt])
+  @@map("version_events")
+}
+
+/// 同步任务队列（SQLite 持久化，重启不丢失）
+model SyncTask {
+  id           Int       @id @default(autoincrement())
+  repositoryId Int
+  trigger      String // schedule | manual | import | batch | retry
+  mode         String    @default("incremental") // full | incremental
+  status       String    @default("pending") // pending | running | succeeded | failed
+  priority     Int       @default(0)
+  attempts     Int       @default(0)
+  maxAttempts  Int       @default(5)
+  runAt        DateTime  @default(now())
+  lockedAt     DateTime?
+  lockedBy     String?
+  lastError    String?
+  createdAt    DateTime  @default(now())
+  startedAt    DateTime?
+  finishedAt   DateTime?
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  logs       SyncLog[]
+
+  @@index([status, runAt])
+  @@index([repositoryId, status])
+  @@map("sync_tasks")
+}
+
+/// 同步日志
+model SyncLog {
+  id                 Int       @id @default(autoincrement())
+  repositoryId       Int
+  taskId             Int?
+  trigger            String?
+  mode               String?
+  status             String // success | failed | partial
+  startedAt          DateTime
+  finishedAt         DateTime?
+  durationMs         Int?
+  requestCount       Int       @default(0)
+  notModifiedCount   Int       @default(0)
+  newReleases        Int       @default(0)
+  newTags            Int       @default(0)
+  newCommits         Int       @default(0)
+  newAssets          Int       @default(0)
+  newChangelog       Int       @default(0)
+  summary            String?
+  error              String?
+  details            String? // JSON：发现的新版本等
+  rateLimitRemaining Int?
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  task       SyncTask?  @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([repositoryId, startedAt])
+  @@map("sync_logs")
+}
+
+/// 系统配置（key-value）
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+/// 更新通知
+model Notification {
+  id             Int       @id @default(autoincrement())
+  repositoryId   Int
+  versionEventId Int?
+  channel        String // web | email | telegram | discord | webhook
+  title          String
+  body           String?
+  url            String?
+  status         String    @default("pending") // pending | sent | failed | skipped
+  error          String?
+  readAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  repository   Repository    @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  versionEvent VersionEvent? @relation(fields: [versionEventId], references: [id], onDelete: SetNull)
+
+  @@unique([versionEventId, channel])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+/// GitHub 条件请求缓存（ETag / Last-Modified）
+model HttpCache {
+  key          String   @id
+  etag         String?
+  lastModified String?
+  body         String
+  linkHeader   String?
+  updatedAt    DateTime @updatedAt
+
+  @@map("http_cache")
+}
+
+// ---------------- Issues / Discussions（社区数据，独立于版本监控的同步通道） ----------------
+
+/// GitHub Issue（不含 Pull Request）
+model Issue {
+  id              Int       @id @default(autoincrement())
+  repositoryId    Int
+  number          Int
+  title           String
+  state           String // open | closed
+  stateReason     String? // completed | not_planned | reopened ...
+  authorLogin     String?
+  authorAvatar    String?
+  labels          String    @default("[]") // JSON [{name,color}]
+  labelKeys       String    @default("") // "|bug|enhancement|"，用于按标签筛选
+  assignees       String    @default("[]") // JSON [{login,avatar}]
+  assigneeKeys    String    @default("") // "|alice|bob|"
+  milestone       String?
+  issueType       String? // GitHub Issue Types
+  comments        Int       @default(0)
+  reactions       Int       @default(0)
+  locked          Boolean   @default(false)
+  htmlUrl         String
+  body            String? // 按需加载并缓存
+  bodyFetchedAt   DateTime?
+  createdAtRemote DateTime
+  updatedAtRemote DateTime
+  closedAtRemote  DateTime?
+  firstSeenAt     DateTime  @default(now())
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, number])
+  @@index([repositoryId, state, updatedAtRemote])
+  @@index([repositoryId, state, createdAtRemote])
+  @@map("issues")
+}
+
+/// GitHub Discussion
+model Discussion {
+  id              Int       @id @default(autoincrement())
+  repositoryId    Int
+  number          Int
+  title           String
+  authorLogin     String?
+  authorAvatar    String?
+  categoryName    String?
+  categoryEmoji   String?
+  isAnswerable    Boolean   @default(false)
+  isAnswered      Boolean   @default(false)
+  closed          Boolean   @default(false)
+  locked          Boolean   @default(false)
+  upvotes         Int       @default(0)
+  comments        Int       @default(0)
+  labels          String    @default("[]")
+  labelKeys       String    @default("")
+  htmlUrl         String
+  body            String?
+  bodyFetchedAt   DateTime?
+  createdAtRemote DateTime
+  updatedAtRemote DateTime
+  firstSeenAt     DateTime  @default(now())
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, number])
+  @@index([repositoryId, closed, updatedAtRemote])
+  @@index([repositoryId, categoryName])
+  @@map("discussions")
+}
+
+/// 仓库标签（Issues 与 Discussions 共用）
+model RepoLabel {
+  id           Int     @id @default(autoincrement())
+  repositoryId Int
+  name         String
+  color        String?
+  description  String?
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, name])
+  @@map("repo_labels")
+}
+
+/// Discussion 分类
+model DiscussionCategory {
+  id           Int     @id @default(autoincrement())
+  repositoryId Int
+  name         String
+  slug         String?
+  emoji        String?
+  isAnswerable Boolean @default(false)
+  position     Int     @default(0)
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, name])
+  @@map("discussion_categories")
+}
+
+/// Issues / Discussions 同步状态：增量水位 + 分批回填游标
+model CommunitySync {
+  id            Int       @id @default(autoincrement())
+  repositoryId  Int
+  kind          String // issues | discussions
+  scope         String    @default("all") // off | open | all
+  status        String    @default("idle") // idle | running | backfilling | ok | unavailable | failed
+  watermark     DateTime? // 已同步到的最近 updatedAt（增量水位）
+  cursor        String? // 回填游标（JSON）
+  backfillDone  Boolean   @default(false)
+  remoteOpen    Int? // GitHub 上的开放数量
+  remoteClosed  Int?
+  remoteTotal   Int?
+  lastSyncedAt  DateTime?
+  nextSyncAt    DateTime?
+  lastError     String?
+  lastSummary   String?
+  updatedAt     DateTime  @updatedAt
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, kind])
+  @@index([nextSyncAt])
+  @@map("community_syncs")
+}

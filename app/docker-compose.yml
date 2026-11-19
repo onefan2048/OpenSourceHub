@@ -1,0 +1,39 @@
+services:
+  init:
+    build: .
+    environment:
+      DATABASE_URL: file:/app/data/hub.db
+    volumes:
+      - ./data:/app/data
+    command: ["npm", "run", "db:push"]
+    restart: "no"
+  web:
+    build: .
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: file:/app/data/hub.db
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      PORT: 3000
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "127.0.0.1:${PORT:-3000}:3000"
+    restart: unless-stopped
+  worker:
+    build: .
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: file:/app/data/hub.db
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      WORKER_TICK_MS: ${WORKER_TICK_MS:-3000}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./data:/app/data
+    command: ["npm", "run", "worker"]
+    restart: unless-stopped
