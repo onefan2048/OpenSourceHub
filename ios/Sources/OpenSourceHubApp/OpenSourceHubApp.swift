@@ -19,6 +19,7 @@ struct OpenSourceHubApp: App {
             MainTabView()
                 .environmentObject(appStore)
                 .tint(HubTheme.accent)
+                .preferredColorScheme(appStore.preferredColorScheme)
         }
         .onChange(of: scenePhase) { newPhase in
             if newPhase == .background {

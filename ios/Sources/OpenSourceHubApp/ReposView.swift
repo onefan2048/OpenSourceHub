@@ -10,19 +10,26 @@ struct ReposView: View {
     @State private var showingCategoriesSheet = false
 
     private var filteredRepos: [RepositoryItem] {
-        app.repos.filter { repo in
-            if let catId = app.selectedCategoryId {
-                if catId == -1 {
+        let allowedCategoryIds: Set<Int64>? = {
+            guard let cid = app.selectedCategoryId, cid > 0 else { return nil }
+            return CategoryTree.descendantIds(of: cid, in: app.categoryTree)
+        }()
+
+        return app.repos.filter { repo in
+            if let cid = app.selectedCategoryId {
+                if cid == -1 {
                     if repo.categoryId != nil { return false }
-                } else if repo.categoryId != catId {
-                    return false
+                } else if let allowed = allowedCategoryIds {
+                    guard let rc = repo.categoryId, allowed.contains(rc) else { return false }
                 }
             }
             let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if q.isEmpty { return true }
+            let catPath = app.categoryPath(for: repo.categoryId)?.lowercased() ?? ""
             return repo.fullName.lowercased().contains(q)
                 || (repo.description?.lowercased().contains(q) ?? false)
                 || (repo.latestVersion?.lowercased().contains(q) ?? false)
+                || catPath.contains(q)
                 || repo.platforms.contains(where: { $0.lowercased().contains(q) })
         }
     }
@@ -31,7 +38,7 @@ struct ReposView: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    // Search Pill (LCSign style)
+                    // Search Pill
                     HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass")
                             .foregroundStyle(.secondary)
@@ -50,7 +57,7 @@ struct ReposView: View {
                     .background(Color.secondary.opacity(0.12))
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                    // Hero "发现软件" Summary Card (LCSign inspired)
+                    // Hero "发现软件" Summary Card
                     heroDiscoverCard
 
                     // Live sync progress banner
@@ -66,9 +73,14 @@ struct ReposView: View {
                         .hubCard(padding: 12, radius: 14)
                     }
 
-                    // Category filter chips
-                    if !app.categories.isEmpty {
-                        categoryChipsBar
+                    // Multi-level category filter bar
+                    if !app.categoryTree.isEmpty {
+                        MultiLevelCategoryFilterBar(
+                            tree: app.categoryTree,
+                            totalCount: app.repos.count,
+                            uncategorizedCount: app.repos.filter { $0.categoryId == nil }.count,
+                            selectedCategoryId: $app.selectedCategoryId
+                        )
                     }
 
                     // Section header
@@ -92,6 +104,7 @@ struct ReposView: View {
                             } label: {
                                 RepoCardRow(
                                     repo: repo,
+                                    categoryPath: app.categoryPath(for: repo.categoryId),
                                     isSyncing: app.syncingRepoIds.contains(repo.id)
                                 )
                             }
@@ -120,9 +133,7 @@ struct ReposView: View {
                 .padding(.bottom, 24)
             }
             .background(HubTheme.canvas(scheme).ignoresSafeArea())
-            .refreshable {
-                await app.syncAll(onlyDue: false)
-            }
+            // Requirement 4: Removed .refreshable pull-to-refresh; manual sync-all button kept in top-right toolbar.
             .navigationTitle("软件源")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
@@ -160,7 +171,7 @@ struct ReposView: View {
                 }
             }
             .sheet(isPresented: $showingAddSheet) {
-                AddRepoSheet()
+                AddRepoSheet(defaultCategoryId: app.selectedCategoryId)
             }
             .sheet(isPresented: $showingCategoriesSheet) {
                 CategoriesSheet()
@@ -171,7 +182,7 @@ struct ReposView: View {
     private var currentSectionTitle: String {
         if let cid = app.selectedCategoryId {
             if cid == -1 { return "未分类软件源" }
-            if let cat = app.categories.first(where: { $0.id == cid }) { return cat.name }
+            if let node = app.categoryTree.first(where: { $0.id == cid }) { return node.path }
         }
         return "全部软件源"
     }
@@ -183,10 +194,10 @@ struct ReposView: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("发现软件")
+                        Text("发现软件源")
                             .font(.title3.bold())
                             .foregroundStyle(.primary)
-                        Text("搜索所有已同步的软件源与安装包，也可随时下拉刷新。")
+                        Text("按分类、平台、格式和热度筛选所有已订阅的开源项目，点击右上角可手动全部更新。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.leading)
@@ -235,38 +246,6 @@ struct ReposView: View {
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
-    private var categoryChipsBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                categoryChip(title: "全部", isSelected: app.selectedCategoryId == nil) {
-                    app.selectedCategoryId = nil
-                }
-                ForEach(app.categories) { cat in
-                    categoryChip(title: "\(cat.name) (\(cat.repoCount))", isSelected: app.selectedCategoryId == cat.id) {
-                        app.selectedCategoryId = cat.id
-                    }
-                }
-                categoryChip(title: "未分类", isSelected: app.selectedCategoryId == -1) {
-                    app.selectedCategoryId = -1
-                }
-            }
-            .padding(.vertical, 2)
-        }
-    }
-
-    private func categoryChip(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(isSelected ? .white : .primary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(isSelected ? HubTheme.accent : HubTheme.card(scheme))
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-
     private var emptyStateCard: some View {
         VStack(spacing: 12) {
             Image(systemName: "shippingbox")
@@ -274,7 +253,7 @@ struct ReposView: View {
                 .foregroundStyle(HubTheme.accent.opacity(0.7))
             Text(app.repos.isEmpty ? "还没有添加软件源" : "没有匹配的软件源")
                 .font(.headline)
-            Text(app.repos.isEmpty ? "点击右上角 + 添加 GitHub 仓库（支持批量导入），即可实时监控版本、安装包与源码动态。" : "尝试更换搜索关键词或切换分类。")
+            Text(app.repos.isEmpty ? "点击右上角 + 添加 GitHub 仓库（支持批量导入），即可监控版本、安装包与源码动态。" : "尝试更换搜索关键词或切换分类。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -294,89 +273,5 @@ struct ReposView: View {
         }
         .frame(maxWidth: .infinity)
         .hubCard(padding: 28)
-    }
-}
-
-private struct RepoCardRow: View {
-    let repo: RepositoryItem
-    let isSyncing: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                RepoIconView(repo: repo, size: 46)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(repo.name)
-                            .font(.body.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        if let ver = repo.latestVersion {
-                            Text(ver)
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(HubTheme.accent)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(HubTheme.accentSoft)
-                                .clipShape(Capsule())
-                                .lineLimit(1)
-                        }
-                    }
-                    Text(repo.fullName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Spacer()
-
-                if isSyncing {
-                    ProgressView()
-                        .tint(HubTheme.accent)
-                } else {
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-
-            if let err = repo.lastError, !err.isEmpty {
-                Text(err)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            } else if let desc = repo.description, !desc.isEmpty {
-                Text(desc)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            } else {
-                Text(repo.repoStatus.label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack(spacing: 6) {
-                ForEach(repo.platforms.prefix(4), id: \.self) { p in
-                    if let plat = Platform(rawValue: p) {
-                        PlatformPill(platform: plat)
-                    }
-                }
-                if repo.platforms.isEmpty {
-                    StatusBadgeView(status: repo.repoStatus)
-                }
-                Spacer()
-                if repo.stars > 0 {
-                    Label("\(repo.stars)", systemImage: "star.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Text(DateFmt.relative(repo.lastSyncedAt))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .hubCard(padding: 15, radius: 20)
     }
 }

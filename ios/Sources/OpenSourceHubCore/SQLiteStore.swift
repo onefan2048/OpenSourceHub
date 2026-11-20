@@ -305,6 +305,9 @@ public final class SQLiteStore: @unchecked Sendable {
         );
         """
         try exec(schema)
+        // Safe v2 column migrations for existing v1 databases
+        _ = try? exec("ALTER TABLE repositories ADD COLUMN languages_json TEXT NOT NULL DEFAULT '{}';")
+        _ = try? exec("ALTER TABLE repositories ADD COLUMN root_tree_json TEXT NOT NULL DEFAULT '[]';")
     }
 
     private func exec(_ sql: String) throws {
@@ -457,6 +460,21 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    public func updateCategory(id: Int64, name: String, parentId: Int64?) {
+        queue.sync {
+            let safeParent = (parentId == id) ? nil : parentId
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "UPDATE categories SET name=?, parent_id=?, updated_at=? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK {
+                bindText(stmt, 1, name.trimmingCharacters(in: .whitespacesAndNewlines))
+                bindInt64(stmt, 2, safeParent)
+                bindDate(stmt, 3, Date())
+                bindInt64(stmt, 4, id)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
     public func renameCategory(id: Int64, name: String) {
         queue.sync {
             var stmt: OpaquePointer?
@@ -491,8 +509,30 @@ public final class SQLiteStore: @unchecked Sendable {
         readme, readme_sha, watched_files, poll_interval_minutes, paused, baseline_established, baseline_at,
         notify_enabled, notify_release, notify_prerelease, notify_tag, notify_commit, notify_changelog,
         last_synced_at, last_sync_status, last_sync_duration_ms, next_sync_at, consecutive_failures,
-        category_id, added_at, updated_at
+        category_id, added_at, updated_at, languages_json, root_tree_json
     """
+
+    private func decodeLanguages(_ json: String?) -> [String: Int] {
+        guard let json = json, let data = json.data(using: .utf8),
+              let dict = try? JSONDecoder().decode([String: Int].self, from: data) else { return [:] }
+        return dict
+    }
+
+    private func encodeLanguages(_ dict: [String: Int]) -> String {
+        guard let data = try? JSONEncoder().encode(dict), let s = String(data: data, encoding: .utf8) else { return "{}" }
+        return s
+    }
+
+    private func decodeRootTree(_ json: String?) -> [RepoTreeEntry] {
+        guard let json = json, let data = json.data(using: .utf8),
+              let arr = try? JSONDecoder().decode([RepoTreeEntry].self, from: data) else { return [] }
+        return arr
+    }
+
+    private func encodeRootTree(_ arr: [RepoTreeEntry]) -> String {
+        guard let data = try? JSONEncoder().encode(arr), let s = String(data: data, encoding: .utf8) else { return "[]" }
+        return s
+    }
 
     private func readRepo(_ stmt: OpaquePointer?) -> RepositoryItem {
         RepositoryItem(
@@ -513,6 +553,8 @@ public final class SQLiteStore: @unchecked Sendable {
             watchers: Int(sqlite3_column_int64(stmt, 14)),
             license: colText(stmt, 15),
             language: colText(stmt, 16),
+            languages: decodeLanguages(colText(stmt, 56)),
+            rootTree: decodeRootTree(colText(stmt, 57)),
             topics: decodeStringArray(colText(stmt, 17)),
             defaultBranch: colText(stmt, 18),
             isArchived: colBool(stmt, 19),
@@ -642,7 +684,8 @@ public final class SQLiteStore: @unchecked Sendable {
                 latest_version_at=?, latest_activity_at=?, readme=?, readme_sha=?, watched_files=?, poll_interval_minutes=?,
                 paused=?, baseline_established=?, baseline_at=?, notify_enabled=?, notify_release=?, notify_prerelease=?,
                 notify_tag=?, notify_commit=?, notify_changelog=?, last_synced_at=?, last_sync_status=?,
-                last_sync_duration_ms=?, next_sync_at=?, consecutive_failures=?, category_id=?, updated_at=?
+                last_sync_duration_ms=?, next_sync_at=?, consecutive_failures=?, category_id=?, updated_at=?,
+                languages_json=?, root_tree_json=?
             WHERE id=?;
             """
             var stmt: OpaquePointer?
@@ -700,7 +743,9 @@ public final class SQLiteStore: @unchecked Sendable {
                 bindInt(stmt, 51, repo.consecutiveFailures)
                 bindInt64(stmt, 52, repo.categoryId)
                 bindDate(stmt, 53, Date())
-                bindInt64(stmt, 54, repo.id)
+                bindText(stmt, 54, encodeLanguages(repo.languages))
+                bindText(stmt, 55, encodeRootTree(repo.rootTree))
+                bindInt64(stmt, 56, repo.id)
                 sqlite3_step(stmt)
             }
             sqlite3_finalize(stmt)
@@ -1272,12 +1317,21 @@ public final class SQLiteStore: @unchecked Sendable {
     }
 
     public func markNotificationRead(id: Int64) {
+        markNotificationsRead(ids: [id])
+    }
+
+    public func markNotificationsRead(ids: [Int64]) {
+        guard !ids.isEmpty else { return }
         queue.sync {
+            let now = Date()
             var stmt: OpaquePointer?
             if sqlite3_prepare_v2(db, "UPDATE notifications SET read_at=? WHERE id=? AND read_at IS NULL;", -1, &stmt, nil) == SQLITE_OK {
-                bindDate(stmt, 1, Date())
-                bindInt64(stmt, 2, id)
-                sqlite3_step(stmt)
+                for id in ids {
+                    sqlite3_reset(stmt)
+                    bindDate(stmt, 1, now)
+                    bindInt64(stmt, 2, id)
+                    sqlite3_step(stmt)
+                }
             }
             sqlite3_finalize(stmt)
         }
@@ -1592,11 +1646,15 @@ public final class SQLiteStore: @unchecked Sendable {
 
     public func exportBackupJSON() throws -> Data {
         let categories = listCategories()
+        let reposList = listRepositories()
+        let tree = CategoryTree.build(categories: categories, repos: reposList)
         let catMap = Dictionary(uniqueKeysWithValues: categories.map { ($0.id, $0.name) })
-        let repos = listRepositories().map { r in
+        let pathMap = Dictionary(uniqueKeysWithValues: tree.map { ($0.id, $0.path) })
+        let repos = reposList.map { r in
             HubBackupPayload.BackupRepoEntry(
                 fullName: r.fullName,
                 categoryName: r.categoryId.flatMap { catMap[$0] },
+                categoryPath: r.categoryId.flatMap { pathMap[$0] },
                 pollIntervalMinutes: r.pollIntervalMinutes,
                 paused: r.paused,
                 notifyEnabled: r.notifyEnabled,
@@ -1630,18 +1688,44 @@ public final class SQLiteStore: @unchecked Sendable {
             setSetting(k, value: v)
         }
 
-        // Restore categories by name
-        var existingCats = Dictionary(uniqueKeysWithValues: listCategories().map { ($0.name, $0.id) })
-        for cat in payload.categories where existingCats[cat.name] == nil {
-            let newId = createCategory(name: cat.name)
-            existingCats[cat.name] = newId
+        // Restore multi-level categories preserving parent relationships
+        var oldIdToNewId: [Int64: Int64] = [:]
+        var existingByKey: [String: Int64] = [:]
+        for c in listCategories() {
+            existingByKey["\(c.parentId ?? 0):\(c.name)"] = c.id
         }
+        var pending = payload.categories
+        var progress = true
+        while !pending.isEmpty && progress {
+            progress = false
+            var next: [CategoryItem] = []
+            for cat in pending {
+                if let oldParent = cat.parentId, oldIdToNewId[oldParent] == nil, payload.categories.contains(where: { $0.id == oldParent }) {
+                    next.append(cat)
+                    continue
+                }
+                let mappedParent = cat.parentId.flatMap { oldIdToNewId[$0] }
+                let key = "\(mappedParent ?? 0):\(cat.name)"
+                if let existingId = existingByKey[key] {
+                    oldIdToNewId[cat.id] = existingId
+                } else {
+                    let newId = createCategory(name: cat.name, parentId: mappedParent)
+                    existingByKey[key] = newId
+                    oldIdToNewId[cat.id] = newId
+                }
+                progress = true
+            }
+            pending = next
+        }
+        let treeAfter = CategoryTree.build(categories: listCategories(), repos: [])
+        let pathToId = Dictionary(uniqueKeysWithValues: treeAfter.map { ($0.path, $0.id) })
+        let nameToId = Dictionary(listCategories().map { ($0.name, $0.id) }, uniquingKeysWith: { a, _ in a })
 
         // Restore repos
         var imported = 0
         for entry in payload.repos {
             if case let .ok(ref) = RepoParser.parse(entry.fullName) {
-                let catId = entry.categoryName.flatMap { existingCats[$0] }
+                let catId = entry.categoryPath.flatMap { pathToId[$0] } ?? entry.categoryName.flatMap { nameToId[$0] }
                 if var pair = addRepository(ref, categoryId: catId) {
                     pair.repo.pollIntervalMinutes = entry.pollIntervalMinutes
                     pair.repo.paused = entry.paused

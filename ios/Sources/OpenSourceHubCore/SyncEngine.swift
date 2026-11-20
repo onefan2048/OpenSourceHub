@@ -135,6 +135,13 @@ public enum SyncEngine {
 
         let updatedBase = "/repos/\(repo.owner)/\(repo.name)"
 
+        // 1b. Languages breakdown
+        if isBaseline || full || repo.languages.isEmpty {
+            if let langResp: GitHubResponse<[String: Int]> = try? await gh.request(path: "\(updatedBase)/languages") {
+                repo.languages = langResp.data
+            }
+        }
+
         // 2. Releases + Assets
         do {
             var nextPath: String? = "\(updatedBase)/releases?per_page=100"
@@ -251,6 +258,19 @@ public enum SyncEngine {
                 }
                 nextPath = resp.nextLink
             }
+            // Backfill tag commit dates up to sync.tagDateBackfillPerSync
+            let backfillLimit = max(0, min(50, store.getIntSetting("sync.tagDateBackfillPerSync", fallback: 5)))
+            if backfillLimit > 0 {
+                let missingDateTags = store.listTags(repositoryId: repo.id).filter { $0.commitDate == nil }.prefix(backfillLimit)
+                for var tag in missingDateTags {
+                    if let cResp: GitHubResponse<GhSingleCommitDTO> = try? await gh.request(path: "\(updatedBase)/commits/\(tag.commitSha)") {
+                        if let dt = parseISO(cResp.data.commit.committer?.date ?? cResp.data.commit.author?.date) {
+                            tag.commitDate = dt
+                            _ = store.upsertTag(tag)
+                        }
+                    }
+                }
+            }
         } catch {
             result.errors.append("Tags: \(error.localizedDescription)")
         }
@@ -303,9 +323,16 @@ public enum SyncEngine {
         }
 
         // 5. Root tree -> README, Logo, Changelog, Version Files
-        if isBaseline || headChanged || full || repo.readme == nil {
+        if isBaseline || headChanged || full || repo.readme == nil || repo.rootTree.isEmpty {
             do {
                 let resp: GitHubResponse<[GhContentEntryDTO]> = try await gh.request(path: "\(updatedBase)/contents")
+                let sortedTree = resp.data
+                    .map { RepoTreeEntry(name: $0.name, path: $0.path, type: $0.type) }
+                    .sorted { a, b in
+                        if a.type != b.type { return a.type == "dir" }
+                        return a.name.localizedStandardCompare(b.name) == .orderedAscending
+                    }
+                repo.rootTree = sortedTree
                 let files = resp.data.filter { $0.type == "file" }
 
                 // Logo
@@ -457,39 +484,63 @@ public enum SyncEngine {
         return (result, gh.rateLimit)
     }
 
-    // MARK: - Community Sync (Issues & Discussions)
+    // MARK: - Community Sync (Batched Anti-Lag Issues & Discussions + Multi-turn Thread Fetch)
 
-    public static func syncIssues(store: SQLiteStore, repo: RepositoryItem) async throws -> Int {
+    public static func syncIssues(
+        store: SQLiteStore,
+        repo: RepositoryItem,
+        maxPages: Int? = nil,
+        onProgress: (@Sendable (Int, Int) -> Void)? = nil
+    ) async throws -> Int {
         let gh = GitHubClient(store: store, token: store.getSetting("github.token"))
-        let resp: GitHubResponse<[GhIssueDTO]> = try await gh.request(path: "/repos/\(repo.owner)/\(repo.name)/issues?state=all&sort=updated&direction=desc&per_page=50")
-        var count = 0
-        for item in resp.data where item.pull_request == nil {
-            let issue = IssueItem(
-                id: 0,
-                repositoryId: repo.id,
-                number: item.number,
-                title: item.title,
-                state: item.state,
-                authorLogin: item.user?.login,
-                labels: (item.labels ?? []).map { LabelBadge(name: $0.name, color: $0.color) },
-                comments: item.comments,
-                htmlUrl: item.html_url,
-                body: item.body,
-                createdAtRemote: parseISO(item.created_at) ?? Date(),
-                updatedAtRemote: parseISO(item.updated_at) ?? Date()
-            )
-            store.upsertIssue(issue)
-            count += 1
+        let pagesLimit = max(1, min(20, maxPages ?? store.getIntSetting("community.pagesPerRun", fallback: 5)))
+        var nextPath: String? = "/repos/\(repo.owner)/\(repo.name)/issues?state=all&sort=updated&direction=desc&per_page=50"
+        var page = 0
+        var total = 0
+
+        while let path = nextPath, page < pagesLimit {
+            page += 1
+            let resp: GitHubResponse<[GhIssueDTO]> = try await gh.request(path: path)
+            for item in resp.data where item.pull_request == nil {
+                let issue = IssueItem(
+                    id: 0,
+                    repositoryId: repo.id,
+                    number: item.number,
+                    title: item.title,
+                    state: item.state,
+                    authorLogin: item.user?.login,
+                    labels: (item.labels ?? []).map { LabelBadge(name: $0.name, color: $0.color) },
+                    comments: item.comments,
+                    htmlUrl: item.html_url,
+                    body: item.body,
+                    createdAtRemote: parseISO(item.created_at) ?? Date(),
+                    updatedAtRemote: parseISO(item.updated_at) ?? Date()
+                )
+                store.upsertIssue(issue)
+                total += 1
+            }
+            onProgress?(page, total)
+            if resp.notModified || resp.data.isEmpty { break }
+            nextPath = resp.nextLink
+            // Brief yield between pages so UI remains 100% responsive
+            try? await Task.sleep(nanoseconds: 80_000_000)
         }
-        return count
+        return total
     }
 
-    public static func syncDiscussions(store: SQLiteStore, repo: RepositoryItem) async throws -> Int {
+    public static func syncDiscussions(
+        store: SQLiteStore,
+        repo: RepositoryItem,
+        maxPages: Int? = nil,
+        onProgress: (@Sendable (Int, Int) -> Void)? = nil
+    ) async throws -> Int {
         let gh = GitHubClient(store: store, token: store.getSetting("github.token"))
+        let pagesLimit = max(1, min(20, maxPages ?? store.getIntSetting("community.pagesPerRun", fallback: 5)))
         let query = """
-        query($owner: String!, $name: String!) {
+        query($owner: String!, $name: String!, $after: String) {
           repository(owner: $owner, name: $name) {
-            discussions(first: 30, orderBy: {field: UPDATED_AT, direction: DESC}) {
+            discussions(first: 40, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
+              pageInfo { hasNextPage endCursor }
               nodes {
                 number
                 title
@@ -508,40 +559,133 @@ public enum SyncEngine {
           }
         }
         """
-        let json = try await gh.graphql(query: query, variables: ["owner": repo.owner, "name": repo.name])
+        var cursor: String? = nil
+        var total = 0
+        for page in 1...pagesLimit {
+            var vars: [String: Any] = ["owner": repo.owner, "name": repo.name]
+            if let c = cursor { vars["after"] = c }
+            let json = try await gh.graphql(query: query, variables: vars)
+            guard let data = json["data"] as? [String: Any],
+                  let repoObj = data["repository"] as? [String: Any],
+                  let discObj = repoObj["discussions"] as? [String: Any],
+                  let nodes = discObj["nodes"] as? [[String: Any]] else {
+                break
+            }
+            for n in nodes {
+                guard let number = n["number"] as? Int, let title = n["title"] as? String else { continue }
+                let author = (n["author"] as? [String: Any])?["login"] as? String
+                let cat = n["category"] as? [String: Any]
+                let commentsCount = ((n["comments"] as? [String: Any])?["totalCount"] as? Int) ?? 0
+                let disc = DiscussionItem(
+                    id: 0,
+                    repositoryId: repo.id,
+                    number: number,
+                    title: title,
+                    authorLogin: author,
+                    categoryName: cat?["name"] as? String,
+                    categoryEmoji: cat?["emoji"] as? String,
+                    isAnswered: (n["isAnswered"] as? Bool) ?? false,
+                    closed: (n["closed"] as? Bool) ?? false,
+                    upvotes: (n["upvoteCount"] as? Int) ?? 0,
+                    comments: commentsCount,
+                    htmlUrl: (n["url"] as? String) ?? repo.htmlUrl,
+                    body: n["body"] as? String,
+                    createdAtRemote: parseISO(n["createdAt"] as? String) ?? Date(),
+                    updatedAtRemote: parseISO(n["updatedAt"] as? String) ?? Date()
+                )
+                store.upsertDiscussion(disc)
+                total += 1
+            }
+            onProgress?(page, total)
+            let pageInfo = discObj["pageInfo"] as? [String: Any]
+            let hasNext = (pageInfo?["hasNextPage"] as? Bool) ?? false
+            cursor = pageInfo?["endCursor"] as? String
+            if !hasNext || cursor == nil { break }
+            try? await Task.sleep(nanoseconds: 80_000_000)
+        }
+        return total
+    }
+
+    /// Fetch full multi-turn comments for an Issue
+    public static func fetchIssueComments(store: SQLiteStore, repo: RepositoryItem, number: Int) async throws -> [ThreadCommentItem] {
+        let gh = GitHubClient(store: store, token: store.getSetting("github.token"))
+        let resp: GitHubResponse<[GhIssueCommentDTO]> = try await gh.request(path: "/repos/\(repo.owner)/\(repo.name)/issues/\(number)/comments?per_page=100")
+        return resp.data.map { c in
+            ThreadCommentItem(
+                id: String(c.id),
+                authorLogin: c.user?.login ?? "ghost",
+                authorAvatarUrl: c.user?.avatar_url,
+                body: c.body ?? "",
+                createdAt: parseISO(c.created_at) ?? Date(),
+                isAnswer: false,
+                replies: []
+            )
+        }
+    }
+
+    /// Fetch full multi-turn comments and nested replies for a Discussion (GraphQL)
+    public static func fetchDiscussionThread(store: SQLiteStore, repo: RepositoryItem, number: Int) async throws -> (body: String?, comments: [ThreadCommentItem]) {
+        let gh = GitHubClient(store: store, token: store.getSetting("github.token"))
+        let query = """
+        query($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            discussion(number: $number) {
+              body
+              comments(first: 60) {
+                nodes {
+                  id
+                  body
+                  createdAt
+                  isAnswer
+                  author { login avatarUrl }
+                  replies(first: 30) {
+                    nodes {
+                      id
+                      body
+                      createdAt
+                      author { login avatarUrl }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        let json = try await gh.graphql(query: query, variables: ["owner": repo.owner, "name": repo.name, "number": number])
         guard let data = json["data"] as? [String: Any],
               let repoObj = data["repository"] as? [String: Any],
-              let discObj = repoObj["discussions"] as? [String: Any],
-              let nodes = discObj["nodes"] as? [[String: Any]] else {
-            return 0
+              let disc = repoObj["discussion"] as? [String: Any] else {
+            return (nil, [])
         }
-        var count = 0
-        for n in nodes {
-            guard let number = n["number"] as? Int, let title = n["title"] as? String else { continue }
-            let author = (n["author"] as? [String: Any])?["login"] as? String
-            let cat = n["category"] as? [String: Any]
-            let commentsCount = ((n["comments"] as? [String: Any])?["totalCount"] as? Int) ?? 0
-            let disc = DiscussionItem(
-                id: 0,
-                repositoryId: repo.id,
-                number: number,
-                title: title,
-                authorLogin: author,
-                categoryName: cat?["name"] as? String,
-                categoryEmoji: cat?["emoji"] as? String,
-                isAnswered: (n["isAnswered"] as? Bool) ?? false,
-                closed: (n["closed"] as? Bool) ?? false,
-                upvotes: (n["upvoteCount"] as? Int) ?? 0,
-                comments: commentsCount,
-                htmlUrl: (n["url"] as? String) ?? repo.htmlUrl,
-                body: n["body"] as? String,
-                createdAtRemote: parseISO(n["createdAt"] as? String) ?? Date(),
-                updatedAtRemote: parseISO(n["updatedAt"] as? String) ?? Date()
+        let body = disc["body"] as? String
+        let commentNodes = ((disc["comments"] as? [String: Any])?["nodes"] as? [[String: Any]]) ?? []
+        let comments: [ThreadCommentItem] = commentNodes.compactMap { n in
+            guard let id = n["id"] as? String else { return nil }
+            let author = n["author"] as? [String: Any]
+            let replyNodes = ((n["replies"] as? [String: Any])?["nodes"] as? [[String: Any]]) ?? []
+            let replies: [ThreadCommentItem] = replyNodes.compactMap { r in
+                guard let rid = r["id"] as? String else { return nil }
+                let ra = r["author"] as? [String: Any]
+                return ThreadCommentItem(
+                    id: rid,
+                    authorLogin: (ra?["login"] as? String) ?? "ghost",
+                    authorAvatarUrl: ra?["avatarUrl"] as? String,
+                    body: (r["body"] as? String) ?? "",
+                    createdAt: parseISO(r["createdAt"] as? String) ?? Date()
+                )
+            }
+            return ThreadCommentItem(
+                id: id,
+                authorLogin: (author?["login"] as? String) ?? "ghost",
+                authorAvatarUrl: author?["avatarUrl"] as? String,
+                body: (n["body"] as? String) ?? "",
+                createdAt: parseISO(n["createdAt"] as? String) ?? Date(),
+                isAnswer: (n["isAnswer"] as? Bool) ?? false,
+                replies: replies
             )
-            store.upsertDiscussion(disc)
-            count += 1
         }
-        return count
+        return (body, comments)
     }
 
     private static func logSync(store: SQLiteStore, repoId: Int64, trigger: String, mode: String, result: SyncResult, gh: GitHubClient, start: Date) {

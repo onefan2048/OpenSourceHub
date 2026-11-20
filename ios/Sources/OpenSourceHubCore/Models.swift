@@ -114,6 +114,18 @@ public struct CategoryItem: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+public struct RepoTreeEntry: Codable, Equatable, Hashable, Sendable {
+    public var name: String
+    public var path: String
+    public var type: String // "dir" | "file"
+
+    public init(name: String, path: String, type: String) {
+        self.name = name
+        self.path = path
+        self.type = type
+    }
+}
+
 public struct RepositoryItem: Identifiable, Codable, Equatable, Sendable {
     public var id: Int64
     public var provider: String
@@ -132,6 +144,8 @@ public struct RepositoryItem: Identifiable, Codable, Equatable, Sendable {
     public var watchers: Int
     public var license: String?
     public var language: String?
+    public var languages: [String: Int] = [:]
+    public var rootTree: [RepoTreeEntry] = []
     public var topics: [String]
     public var defaultBranch: String?
     public var isArchived: Bool
@@ -220,7 +234,6 @@ public struct AssetItem: Identifiable, Codable, Equatable, Sendable {
     public var kind: String
     public var confidence: String
     public var createdAtRemote: Date?
-    // Joined optional metadata for Discover view
     public var repoFullName: String?
     public var releaseTag: String?
 
@@ -364,6 +377,26 @@ public struct DiscussionItem: Identifiable, Codable, Equatable, Sendable {
     public var updatedAtRemote: Date
 }
 
+public struct ThreadCommentItem: Identifiable, Codable, Equatable, Sendable {
+    public var id: String
+    public var authorLogin: String
+    public var authorAvatarUrl: String?
+    public var body: String
+    public var createdAt: Date
+    public var isAnswer: Bool
+    public var replies: [ThreadCommentItem]
+
+    public init(id: String, authorLogin: String, authorAvatarUrl: String? = nil, body: String, createdAt: Date, isAnswer: Bool = false, replies: [ThreadCommentItem] = []) {
+        self.id = id
+        self.authorLogin = authorLogin
+        self.authorAvatarUrl = authorAvatarUrl
+        self.body = body
+        self.createdAt = createdAt
+        self.isAnswer = isAnswer
+        self.replies = replies
+    }
+}
+
 public struct LabelBadge: Codable, Equatable, Hashable, Sendable {
     public var name: String
     public var color: String?
@@ -412,7 +445,7 @@ public struct HubStats: Equatable, Sendable {
 
 public struct SyncResult: Sendable {
     public var ok: Bool
-    public var status: String // success | failed | partial
+    public var status: String
     public var newReleases: Int = 0
     public var newTags: Int = 0
     public var newCommits: Int = 0
@@ -425,18 +458,22 @@ public struct SyncResult: Sendable {
     public var summary: String = ""
 }
 
-// MARK: - Settings Defaults
+// MARK: - Settings Defaults (Aligned with Docker Project)
 
 public enum HubSettings {
     public static let pollIntervals: [Int] = [5, 15, 30, 60, 360, 720, 1440]
 
     public static let defaults: [String: String] = [
-        "poll.defaultIntervalMinutes": "15",
+        "ui.theme": "system", // system | light | dark
+        "poll.defaultIntervalMinutes": "60",
         "sync.initialCommitCount": "30",
-        "sync.maxReleasePages": "10",
-        "sync.maxTagPages": "5",
+        "sync.maxReleasePages": "20",
+        "sync.maxTagPages": "10",
         "sync.tagDateBackfillPerSync": "5",
         "sync.staleDays": "365",
+        "worker.concurrency": "2",
+        "community.intervalMinutes": "30",
+        "community.pagesPerRun": "5",
         "github.token": "",
         "notify.local.enabled": "true",
         "notify.telegram.botToken": "",
@@ -449,13 +486,22 @@ public enum HubSettings {
         "notify.qq.clientSecret": "",
         "notify.qq.groupOpenId": "",
         "notify.webhook.url": "",
+        "notify.email.to": "",
+        "notify.email.provider": "qq",
+        "notify.email.host": "smtp.qq.com",
+        "notify.email.port": "465",
+        "notify.email.security": "tls",
+        "notify.email.username": "",
+        "notify.email.password": "",
+        "notify.email.outlook.clientId": "",
+        "notify.email.outlook.refreshToken": "",
     ]
 }
 
 // MARK: - Backup Payload
 
 public struct HubBackupPayload: Codable, Sendable {
-    public var version: Int = 1
+    public var version: Int = 2
     public var exportedAt: Date
     public var categories: [CategoryItem]
     public var repos: [BackupRepoEntry]
@@ -464,6 +510,7 @@ public struct HubBackupPayload: Codable, Sendable {
     public struct BackupRepoEntry: Codable, Sendable {
         public var fullName: String
         public var categoryName: String?
+        public var categoryPath: String?
         public var pollIntervalMinutes: Int?
         public var paused: Bool
         public var notifyEnabled: Bool

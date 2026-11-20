@@ -1,25 +1,113 @@
 import SwiftUI
 import OpenSourceHubCore
 
+/// Requirement 6: Aligned with Docker's `/discover` page — searches & filters subscribed REPOSITORIES
+/// by multi-level category, platform, file format, quick preset chips, and sort order.
 struct DiscoverView: View {
     @EnvironmentObject private var app: AppStore
     @Environment(\.colorScheme) private var scheme
-    @Environment(\.openURL) private var openURL
+
+    enum QuickPreset: String, CaseIterable {
+        case all = "全部"
+        case recent = "最近更新"
+        case release = "最新发布"
+        case popular = "热门项目"
+        case added = "最近添加"
+        case assets = "有安装包"
+        case source = "只有源码"
+        case macos = "macOS"
+        case windows = "Windows"
+        case ios = "iOS"
+        case android = "Android"
+        case linux = "Linux"
+        case dev = "开发工具"
+    }
+
+    enum SortOption: String, CaseIterable {
+        case updated = "更新时间"
+        case stars = "Star 数"
+        case release = "版本时间"
+        case added = "最近添加"
+    }
 
     @State private var searchText = ""
-    @State private var selectedPlatform: Platform? = nil
-    @State private var softwareOnly = true
-    @State private var assets: [AssetItem] = []
-    @State private var shareURL: URL?
+    @State private var selectedGroupId: Int64? = nil // nil = all, -1 = uncategorized
+    @State private var selectedPlatform: String = "" // "" = all
+    @State private var selectedFileType: String = "" // "" = all
+    @State private var selectedPreset: QuickPreset = .all
+    @State private var sortOption: SortOption = .updated
+    @State private var showingCategoriesSheet = false
+    @State private var showingAddSheet = false
 
-    private var filtered: [AssetItem] {
+    private var availableFileTypes: [String] {
+        Array(Set(app.repos.flatMap(\.fileTypes))).sorted()
+    }
+
+    private var filteredRepos: [RepositoryItem] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if q.isEmpty { return assets }
-        return assets.filter {
-            $0.name.lowercased().contains(q)
-                || ($0.repoFullName?.lowercased().contains(q) ?? false)
-                || ($0.releaseTag?.lowercased().contains(q) ?? false)
-                || $0.fileType.lowercased().contains(q)
+        let allowedCatIds: Set<Int64>? = {
+            guard let gid = selectedGroupId, gid > 0 else { return nil }
+            return CategoryTree.descendantIds(of: gid, in: app.categoryTree)
+        }()
+
+        let rows = app.repos.filter { r in
+            // Text search: name, owner, description, category path
+            if !q.isEmpty {
+                let catPath = app.categoryPath(for: r.categoryId)?.lowercased() ?? ""
+                let match = r.name.lowercased().contains(q)
+                    || r.owner.lowercased().contains(q)
+                    || (r.description?.lowercased().contains(q) ?? false)
+                    || catPath.contains(q)
+                if !match { return false }
+            }
+            // Multi-level category filter
+            if let gid = selectedGroupId {
+                if gid == -1 {
+                    if r.categoryId != nil { return false }
+                } else if let allowed = allowedCatIds {
+                    guard let rc = r.categoryId, allowed.contains(rc) else { return false }
+                }
+            }
+            // Platform dropdown
+            if !selectedPlatform.isEmpty, !r.platforms.contains(selectedPlatform) {
+                return false
+            }
+            // File type dropdown
+            if !selectedFileType.isEmpty, !r.fileTypes.contains(selectedFileType) {
+                return false
+            }
+            // Quick preset filter
+            switch selectedPreset {
+            case .all, .recent, .popular, .added: break
+            case .release: if !r.hasReleases { return false }
+            case .assets: if !r.hasAssets { return false }
+            case .source: if r.hasAssets { return false }
+            case .macos: if !r.platforms.contains("macos") { return false }
+            case .windows: if !r.platforms.contains("windows") { return false }
+            case .ios: if !r.platforms.contains("ios") { return false }
+            case .android: if !r.platforms.contains("android") { return false }
+            case .linux: if !r.platforms.contains("linux") { return false }
+            case .dev:
+                let hay = "\(r.description ?? "") \(r.topics.joined(separator: " "))".lowercased()
+                let isDev = hay.contains("developer") || hay.contains("development") || hay.contains("tool") || hay.contains("编程") || hay.contains("开发")
+                if !isDev { return false }
+            }
+            return true
+        }
+
+        return rows.sorted { a, b in
+            switch sortOption {
+            case .stars:
+                return a.stars > b.stars
+            case .added:
+                return a.addedAt > b.addedAt
+            case .release:
+                return (a.latestVersionAt ?? .distantPast) > (b.latestVersionAt ?? .distantPast)
+            case .updated:
+                let da = a.latestActivityAt ?? a.pushedAt ?? .distantPast
+                let db = b.latestActivityAt ?? b.pushedAt ?? .distantPast
+                return da > db
+            }
         }
     }
 
@@ -27,10 +115,10 @@ struct DiscoverView: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    // Search
+                    // Search bar
                     HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("搜索安装包名、仓库、版本号、格式…", text: $searchText)
+                        TextField("搜索名称、作者、描述或分类", text: $searchText)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                         if !searchText.isEmpty {
@@ -44,53 +132,126 @@ struct DiscoverView: View {
                     .background(Color.secondary.opacity(0.12))
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                    // Platform Filter Chips
+                    // Filter Pickers Row (Platform / Format / Sort)
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
-                            filterChip(title: "全部平台", active: selectedPlatform == nil) {
-                                selectedPlatform = nil
-                                reload()
-                            }
-                            ForEach([Platform.ios, .macos, .windows, .linux, .android, .cross], id: \.self) { plat in
-                                filterChip(title: plat.label, active: selectedPlatform == plat) {
-                                    selectedPlatform = plat
-                                    reload()
+                            Menu {
+                                Button("所有平台") { selectedPlatform = "" }
+                                ForEach(Platform.allCases, id: \.rawValue) { p in
+                                    Button(p.label) { selectedPlatform = p.rawValue }
                                 }
+                            } label: {
+                                dropdownPill(
+                                    title: selectedPlatform.isEmpty ? "所有平台" : (Platform(rawValue: selectedPlatform)?.label ?? selectedPlatform),
+                                    active: !selectedPlatform.isEmpty
+                                )
+                            }
+
+                            Menu {
+                                Button("所有格式") { selectedFileType = "" }
+                                ForEach(availableFileTypes, id: \.self) { ft in
+                                    Button(ft) { selectedFileType = ft }
+                                }
+                            } label: {
+                                dropdownPill(
+                                    title: selectedFileType.isEmpty ? "所有格式" : selectedFileType.uppercased(),
+                                    active: !selectedFileType.isEmpty
+                                )
+                            }
+
+                            Menu {
+                                ForEach(SortOption.allCases, id: \.self) { opt in
+                                    Button(opt.rawValue) { sortOption = opt }
+                                }
+                            } label: {
+                                dropdownPill(title: "排序: \(sortOption.rawValue)", active: false)
                             }
                         }
                     }
 
+                    // Multi-level Category Bar (matches Docker root + sub-category bar)
+                    if !app.categoryTree.isEmpty {
+                        MultiLevelCategoryFilterBar(
+                            tree: app.categoryTree,
+                            totalCount: app.repos.count,
+                            uncategorizedCount: app.repos.filter { $0.categoryId == nil }.count,
+                            selectedCategoryId: $selectedGroupId
+                        )
+                    }
+
+                    // Quick Preset Chips (matches Docker discover presets)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(QuickPreset.allCases, id: \.self) { preset in
+                                Button {
+                                    selectedPreset = preset
+                                    switch preset {
+                                    case .popular: sortOption = .stars
+                                    case .added: sortOption = .added
+                                    case .release: sortOption = .release
+                                    case .recent: sortOption = .updated
+                                    default: break
+                                    }
+                                } label: {
+                                    Text(preset.rawValue)
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(selectedPreset == preset ? .white : .primary)
+                                        .padding(.horizontal, 11)
+                                        .padding(.vertical, 6)
+                                        .background(selectedPreset == preset ? HubTheme.accent : HubTheme.card(scheme))
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+
+                    // Count summary
                     HStack {
-                        Text("共 \(filtered.count) 个附件")
+                        Text(summaryLabel)
                             .font(.caption.weight(.medium))
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Toggle("仅看安装包", isOn: $softwareOnly)
-                            .labelsHidden()
-                            .scaleEffect(0.82)
-                            .onChange(of: softwareOnly) { _ in reload() }
-                        Text("仅看软件")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        if selectedGroupId != nil || !selectedPlatform.isEmpty || !selectedFileType.isEmpty || selectedPreset != .all || !searchText.isEmpty {
+                            Button("重置筛选") {
+                                searchText = ""
+                                selectedGroupId = nil
+                                selectedPlatform = ""
+                                selectedFileType = ""
+                                selectedPreset = .all
+                                sortOption = .updated
+                            }
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HubTheme.accent)
+                        }
                     }
+                    .padding(.top, 2)
 
-                    if filtered.isEmpty {
+                    if filteredRepos.isEmpty {
                         VStack(spacing: 10) {
-                            Image(systemName: "tray")
+                            Image(systemName: "magnifyingglass")
                                 .font(.largeTitle)
                                 .foregroundStyle(.secondary)
-                            Text("暂无匹配的软件包")
+                            Text("没有匹配的软件源")
                                 .font(.headline)
-                            Text("在「软件源」中添加并同步包含 Release 附件的仓库即可在此按平台发现。")
+                            Text("尝试放宽分类、平台或格式筛选条件。")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
                         }
                         .frame(maxWidth: .infinity)
                         .hubCard(padding: 28)
                     } else {
-                        ForEach(filtered) { asset in
-                            assetRow(asset)
+                        ForEach(filteredRepos) { repo in
+                            NavigationLink {
+                                RepoDetailView(repoId: repo.id)
+                            } label: {
+                                RepoCardRow(
+                                    repo: repo,
+                                    categoryPath: app.categoryPath(for: repo.categoryId),
+                                    isSyncing: app.syncingRepoIds.contains(repo.id)
+                                )
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -98,98 +259,54 @@ struct DiscoverView: View {
                 .padding(.bottom, 24)
             }
             .background(HubTheme.canvas(scheme).ignoresSafeArea())
-            .navigationTitle("发现")
+            .navigationTitle("发现软件源")
             .navigationBarTitleDisplayMode(.large)
-            .onAppear { reload() }
-            .onChange(of: app.stats.totalSoftwareAssets) { _ in reload() }
-            .sheet(isPresented: Binding(get: { shareURL != nil }, set: { if !$0 { shareURL = nil } })) {
-                if let url = shareURL {
-                    ShareSheet(items: [url])
-                }
-            }
-        }
-    }
-
-    private func reload() {
-        assets = app.store.listAssets(
-            repositoryId: nil,
-            platform: selectedPlatform?.rawValue,
-            softwareOnly: softwareOnly,
-            limit: 400
-        )
-    }
-
-    private func filterChip(title: String, active: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(active ? .white : .primary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(active ? HubTheme.accent : HubTheme.card(scheme))
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func assetRow(_ asset: AssetItem) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(asset.name)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(2)
-                    if let repoName = asset.repoFullName {
-                        Text("\(repoName) · \(asset.releaseTag ?? "")")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Spacer()
-                if let url = URL(string: asset.downloadUrl) {
+            .toolbar {
+                ToolbarItemGroup(placement: .topBarTrailing) {
                     Button {
-                        openURL(url)
+                        showingCategoriesSheet = true
                     } label: {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .font(.title2)
+                        Image(systemName: "folder.badge.gearshape")
                             .foregroundStyle(HubTheme.accent)
                     }
-                    .buttonStyle(.plain)
+                    Button {
+                        showingAddSheet = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .foregroundStyle(HubTheme.accent)
+                    }
                 }
             }
-
-            HStack(spacing: 6) {
-                PlatformPill(platform: asset.platformEnum)
-                if asset.archEnum != .unknown {
-                    Text(asset.archEnum.label)
-                        .font(.caption2)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Color.secondary.opacity(0.12))
-                        .clipShape(Capsule())
-                }
-                Text(asset.fileType.uppercased())
-                    .font(.caption2.monospaced())
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Color.secondary.opacity(0.12))
-                    .clipShape(Capsule())
-                Spacer()
-                Text(AssetClassifier.formatBytes(asset.size))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                if let url = URL(string: asset.downloadUrl) {
-                    Button {
-                        shareURL = url
-                    } label: {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
+            .sheet(isPresented: $showingCategoriesSheet) {
+                CategoriesSheet()
+            }
+            .sheet(isPresented: $showingAddSheet) {
+                AddRepoSheet(defaultCategoryId: selectedGroupId)
             }
         }
-        .hubCard(padding: 14, radius: 18)
+    }
+
+    private var summaryLabel: String {
+        if let gid = selectedGroupId {
+            if gid == -1 { return "未分类中共 \(filteredRepos.count) 个软件源" }
+            if let node = app.categoryTree.first(where: { $0.id == gid }) {
+                return "分类「\(node.path)」中共 \(filteredRepos.count) 个软件源"
+            }
+        }
+        return "共 \(filteredRepos.count) 个软件源"
+    }
+
+    private func dropdownPill(title: String, active: Bool) -> some View {
+        HStack(spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.medium))
+            Image(systemName: "chevron.down")
+                .font(.system(size: 9, weight: .semibold))
+        }
+        .foregroundStyle(active ? .white : .primary)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 7)
+        .background(active ? HubTheme.accent : HubTheme.card(scheme))
+        .clipShape(Capsule())
     }
 }

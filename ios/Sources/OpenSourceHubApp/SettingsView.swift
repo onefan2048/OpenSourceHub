@@ -6,14 +6,22 @@ struct SettingsView: View {
     @EnvironmentObject private var app: AppStore
     @Environment(\.colorScheme) private var scheme
 
-    @State private var showExporter = false
-    @State private var showImporter = false
-    @State private var exportURL: URL?
-
     var body: some View {
         NavigationStack {
             ScrollView {
                 LazyVStack(spacing: 12) {
+                    // Requirement 9: Theme Switcher (Light / Dark / System)
+                    NavigationLink {
+                        ThemeSettingsView()
+                    } label: {
+                        settingsCardRow(
+                            icon: "paintpalette.fill",
+                            title: "软件主题",
+                            subtitle: themeSubtitle
+                        )
+                    }
+                    .buttonStyle(.plain)
+
                     NavigationLink {
                         GitHubTokenSettingsView()
                     } label: {
@@ -31,7 +39,7 @@ struct SettingsView: View {
                         settingsCardRow(
                             icon: "arrow.triangle.2.circlepath",
                             title: "同步与轮询配置",
-                            subtitle: "默认每 \(app.settings["poll.defaultIntervalMinutes"] ?? "15") 分钟检查更新、分页与基线策略"
+                            subtitle: "轮询 \(app.settings["poll.defaultIntervalMinutes"] ?? "60") 分钟 · 并发 \(app.settings["worker.concurrency"] ?? "2") · 社区每批 \(app.settings["community.pagesPerRun"] ?? "5") 页"
                         )
                     }
                     .buttonStyle(.plain)
@@ -42,7 +50,7 @@ struct SettingsView: View {
                         settingsCardRow(
                             icon: "bell.badge.fill",
                             title: "通知渠道",
-                            subtitle: "iOS 本地推送、Telegram、Discord、企微、飞书、QQ、Webhook"
+                            subtitle: "站内推送、邮件 SMTP、Telegram、Discord、企微、飞书、QQ、Webhook"
                         )
                     }
                     .buttonStyle(.plain)
@@ -52,8 +60,8 @@ struct SettingsView: View {
                     } label: {
                         settingsCardRow(
                             icon: "folder.fill",
-                            title: "分类管理",
-                            subtitle: "已创建 \(app.categories.count) 个软件源分类"
+                            title: "多级分类管理",
+                            subtitle: "已创建 \(app.categories.count) 个分类（支持多级子分类）"
                         )
                     }
                     .buttonStyle(.plain)
@@ -64,7 +72,7 @@ struct SettingsView: View {
                         settingsCardRow(
                             icon: "externaldrive.fill",
                             title: "备份与还原",
-                            subtitle: "导出或导入软件源列表、分类与全局设置（JSON）"
+                            subtitle: "导出或导入软件源列表、多级分类与全局设置（JSON）"
                         )
                     }
                     .buttonStyle(.plain)
@@ -86,7 +94,7 @@ struct SettingsView: View {
                         settingsCardRow(
                             icon: "info.circle.fill",
                             title: "关于与同步日志",
-                            subtitle: "OpenSource Hub iOS 1.0.0 · 原生独立离线版"
+                            subtitle: "OpenSource Hub iOS 2.0.0 · 原生独立离线版"
                         )
                     }
                     .buttonStyle(.plain)
@@ -97,6 +105,14 @@ struct SettingsView: View {
             .background(HubTheme.canvas(scheme).ignoresSafeArea())
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    private var themeSubtitle: String {
+        switch app.settings["ui.theme"] {
+        case "light": return "当前：浅色模式"
+        case "dark": return "当前：深色模式"
+        default: return "当前：跟随系统（自动切换深浅色）"
         }
     }
 
@@ -135,7 +151,32 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - Subpages
+// MARK: - Requirement 9: Theme Settings View
+
+private struct ThemeSettingsView: View {
+    @EnvironmentObject private var app: AppStore
+    @State private var selectedTheme = "system"
+
+    var body: some View {
+        Form {
+            Section("外观模式") {
+                Picker("主题", selection: $selectedTheme) {
+                    Text("跟随系统").tag("system")
+                    Text("浅色模式").tag("light")
+                    Text("深色模式").tag("dark")
+                }
+                .pickerStyle(.inline)
+                .onChange(of: selectedTheme) { val in
+                    app.saveSetting("ui.theme", value: val)
+                }
+            }
+        }
+        .navigationTitle("软件主题")
+        .onAppear { selectedTheme = app.settings["ui.theme"] ?? "system" }
+    }
+}
+
+// MARK: - GitHub Token
 
 private struct GitHubTokenSettingsView: View {
     @EnvironmentObject private var app: AppStore
@@ -172,49 +213,77 @@ private struct GitHubTokenSettingsView: View {
     }
 }
 
+// MARK: - Requirement 1: Sync & Polling Policy (Aligned with Docker)
+
 private struct SyncPolicySettingsView: View {
     @EnvironmentObject private var app: AppStore
-    @State private var pollMinutes = 15
-    @State private var maxReleasePages = 10
-    @State private var maxTagPages = 5
+    @State private var pollMinutes = 60
     @State private var initialCommits = 30
+    @State private var maxReleasePages = 20
+    @State private var maxTagPages = 10
+    @State private var tagDateBackfill = 5
+    @State private var concurrency = 2
+    @State private var communityInterval = 30
+    @State private var communityPagesPerRun = 5
+    @State private var staleDays = 365
 
     var body: some View {
         Form {
-            Section("自动刷新间隔") {
-                Picker("默认间隔", selection: $pollMinutes) {
+            Section("自动轮询与并发") {
+                Picker("默认轮询间隔", selection: $pollMinutes) {
                     ForEach(HubSettings.pollIntervals, id: \.self) { m in
                         Text(m >= 60 ? "\(m / 60) 小时" : "\(m) 分钟").tag(m)
                     }
                 }
+                Stepper("并发同步数: \(concurrency)", value: $concurrency, in: 1...6)
+                Stepper("首次导入 Commit 数量: \(initialCommits)", value: $initialCommits, in: 5...200, step: 5)
             }
 
-            Section("历史抓取上限") {
-                Stepper("Release 最大页数: \(maxReleasePages)", value: $maxReleasePages, in: 1...30)
-                Stepper("Tag 最大页数: \(maxTagPages)", value: $maxTagPages, in: 1...20)
-                Stepper("首次 Commit 条数: \(initialCommits)", value: $initialCommits, in: 10...100, step: 10)
+            Section("历史抓取与 Tag 时间补全") {
+                Stepper("Release 分页上限: \(maxReleasePages)", value: $maxReleasePages, in: 1...100)
+                Stepper("Tag 分页上限: \(maxTagPages)", value: $maxTagPages, in: 1...100)
+                Stepper("每次补全 Tag 时间数量: \(tagDateBackfill)", value: $tagDateBackfill, in: 0...50)
+                Stepper("长期未更新判定天数: \(staleDays)", value: $staleDays, in: 30...1095, step: 30)
+            }
+
+            Section("Issues / Discussions 社区同步") {
+                Stepper("增量同步间隔: \(communityInterval) 分钟", value: $communityInterval, in: 5...1440, step: 5)
+                Stepper("每批回填页数（防卡顿）: \(communityPagesPerRun)", value: $communityPagesPerRun, in: 1...20)
             }
 
             Section {
                 Button("保存配置") {
                     app.saveSetting("poll.defaultIntervalMinutes", value: String(pollMinutes))
+                    app.saveSetting("sync.initialCommitCount", value: String(initialCommits))
                     app.saveSetting("sync.maxReleasePages", value: String(maxReleasePages))
                     app.saveSetting("sync.maxTagPages", value: String(maxTagPages))
-                    app.saveSetting("sync.initialCommitCount", value: String(initialCommits))
+                    app.saveSetting("sync.tagDateBackfillPerSync", value: String(tagDateBackfill))
+                    app.saveSetting("worker.concurrency", value: String(concurrency))
+                    app.saveSetting("community.intervalMinutes", value: String(communityInterval))
+                    app.saveSetting("community.pagesPerRun", value: String(communityPagesPerRun))
+                    app.saveSetting("sync.staleDays", value: String(staleDays))
                     app.showToast("已保存同步配置")
                 }
+                .fontWeight(.semibold)
                 .foregroundStyle(HubTheme.accent)
             }
         }
         .navigationTitle("同步与轮询配置")
         .onAppear {
-            pollMinutes = Int(app.settings["poll.defaultIntervalMinutes"] ?? "") ?? 15
-            maxReleasePages = Int(app.settings["sync.maxReleasePages"] ?? "") ?? 10
-            maxTagPages = Int(app.settings["sync.maxTagPages"] ?? "") ?? 5
+            pollMinutes = Int(app.settings["poll.defaultIntervalMinutes"] ?? "") ?? 60
             initialCommits = Int(app.settings["sync.initialCommitCount"] ?? "") ?? 30
+            maxReleasePages = Int(app.settings["sync.maxReleasePages"] ?? "") ?? 20
+            maxTagPages = Int(app.settings["sync.maxTagPages"] ?? "") ?? 10
+            tagDateBackfill = Int(app.settings["sync.tagDateBackfillPerSync"] ?? "") ?? 5
+            concurrency = Int(app.settings["worker.concurrency"] ?? "") ?? 2
+            communityInterval = Int(app.settings["community.intervalMinutes"] ?? "") ?? 30
+            communityPagesPerRun = Int(app.settings["community.pagesPerRun"] ?? "") ?? 5
+            staleDays = Int(app.settings["sync.staleDays"] ?? "") ?? 365
         }
     }
 }
+
+// MARK: - Requirement 2: Notification Channels (Including SMTP Email!)
 
 private struct NotificationChannelsSettingsView: View {
     @EnvironmentObject private var app: AppStore
@@ -229,13 +298,75 @@ private struct NotificationChannelsSettingsView: View {
     @State private var qqSecret = ""
     @State private var qqGroup = ""
     @State private var webhookUrl = ""
+
+    // Email SMTP fields (aligned with Docker)
+    @State private var emailProvider = "qq"
+    @State private var emailTo = ""
+    @State private var emailUsername = ""
+    @State private var emailPassword = ""
+    @State private var emailHost = "smtp.qq.com"
+    @State private var emailPort = "465"
+    @State private var emailSecurity = "tls"
+    @State private var outlookClientId = ""
+    @State private var outlookRefreshToken = ""
+
     @State private var testing = false
 
     var body: some View {
         Form {
             Section("本机通知") {
-                Toggle("iOS 本地推送通知", isOn: $localEnabled)
+                Toggle("启用站内与 iOS 本地推送通知", isOn: $localEnabled)
             }
+
+            Section {
+                Picker("邮件服务商", selection: $emailProvider) {
+                    Text("QQ 邮箱").tag("qq")
+                    Text("163 邮箱").tag("163")
+                    Text("Gmail").tag("gmail")
+                    Text("Outlook (OAuth2)").tag("outlook")
+                    Text("自定义 SMTP").tag("custom")
+                }
+                .onChange(of: emailProvider) { prov in
+                    switch prov {
+                    case "qq": emailHost = "smtp.qq.com"; emailPort = "465"; emailSecurity = "tls"
+                    case "163": emailHost = "smtp.163.com"; emailPort = "465"; emailSecurity = "tls"
+                    case "gmail": emailHost = "smtp.gmail.com"; emailPort = "465"; emailSecurity = "tls"
+                    case "outlook": emailHost = "smtp.office365.com"; emailPort = "587"; emailSecurity = "starttls"
+                    default: break
+                    }
+                }
+                TextField("收件邮箱", text: $emailTo)
+                    .keyboardType(.emailAddress)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                TextField("发件邮箱（SMTP 用户名）", text: $emailUsername)
+                    .keyboardType(.emailAddress)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                if emailProvider == "outlook" {
+                    TextField("Outlook Client ID", text: $outlookClientId)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    SecureField("Outlook Refresh Token", text: $outlookRefreshToken)
+                } else {
+                    SecureField("SMTP 授权码 / 密码", text: $emailPassword)
+                }
+                TextField("SMTP 服务器", text: $emailHost)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                TextField("SMTP 端口", text: $emailPort)
+                    .keyboardType(.numberPad)
+                Picker("加密方式", selection: $emailSecurity) {
+                    Text("TLS (推荐 465)").tag("tls")
+                    Text("STARTTLS (587)").tag("starttls")
+                }
+                testButton("email", label: "发送测试邮件")
+            } header: {
+                Text("邮件通知 (SMTP)")
+            } footer: {
+                Text("QQ / 163 / Gmail 请填写邮箱授权码并使用 465 端口 TLS 加密。")
+            }
+
             Section("Telegram") {
                 SecureField("Bot Token", text: $tgToken)
                 TextField("Chat ID", text: $tgChat)
@@ -286,6 +417,16 @@ private struct NotificationChannelsSettingsView: View {
             qqSecret = app.settings["notify.qq.clientSecret"] ?? ""
             qqGroup = app.settings["notify.qq.groupOpenId"] ?? ""
             webhookUrl = app.settings["notify.webhook.url"] ?? ""
+
+            emailProvider = app.settings["notify.email.provider"] ?? "qq"
+            emailTo = app.settings["notify.email.to"] ?? ""
+            emailUsername = app.settings["notify.email.username"] ?? ""
+            emailPassword = app.settings["notify.email.password"] ?? ""
+            emailHost = app.settings["notify.email.host"] ?? "smtp.qq.com"
+            emailPort = app.settings["notify.email.port"] ?? "465"
+            emailSecurity = app.settings["notify.email.security"] ?? "tls"
+            outlookClientId = app.settings["notify.email.outlook.clientId"] ?? ""
+            outlookRefreshToken = app.settings["notify.email.outlook.refreshToken"] ?? ""
         }
     }
 
@@ -301,16 +442,26 @@ private struct NotificationChannelsSettingsView: View {
         app.saveSetting("notify.qq.clientSecret", value: qqSecret.trimmingCharacters(in: .whitespacesAndNewlines))
         app.saveSetting("notify.qq.groupOpenId", value: qqGroup.trimmingCharacters(in: .whitespacesAndNewlines))
         app.saveSetting("notify.webhook.url", value: webhookUrl.trimmingCharacters(in: .whitespacesAndNewlines))
+
+        app.saveSetting("notify.email.provider", value: emailProvider)
+        app.saveSetting("notify.email.to", value: emailTo.trimmingCharacters(in: .whitespacesAndNewlines))
+        app.saveSetting("notify.email.username", value: emailUsername.trimmingCharacters(in: .whitespacesAndNewlines))
+        app.saveSetting("notify.email.password", value: emailPassword)
+        app.saveSetting("notify.email.host", value: emailHost.trimmingCharacters(in: .whitespacesAndNewlines))
+        app.saveSetting("notify.email.port", value: emailPort.trimmingCharacters(in: .whitespacesAndNewlines))
+        app.saveSetting("notify.email.security", value: emailSecurity)
+        app.saveSetting("notify.email.outlook.clientId", value: outlookClientId.trimmingCharacters(in: .whitespacesAndNewlines))
+        app.saveSetting("notify.email.outlook.refreshToken", value: outlookRefreshToken.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    private func testButton(_ channel: String) -> some View {
-        Button(testing ? "发送中…" : "发送测试消息") {
+    private func testButton(_ channel: String, label: String = "发送测试消息") -> some View {
+        Button(testing ? "发送中…" : label) {
             saveAll()
             testing = true
             Task {
                 do {
-                    try await NotificationDispatcher.sendTest(channel: channel, settings: app.settings)
-                    app.showToast("\(channel) 测试发送成功")
+                    try await NotificationDispatcher.sendTest(channel: channel, settings: app.settings, store: app.store)
+                    app.showToast("\(channel.uppercased()) 测试发送成功")
                 } catch {
                     app.showToast("失败: \(error.localizedDescription)")
                 }
@@ -322,6 +473,8 @@ private struct NotificationChannelsSettingsView: View {
         .disabled(testing)
     }
 }
+
+// MARK: - Backup, Storage & About
 
 private struct BackupRestoreView: View {
     @EnvironmentObject private var app: AppStore
@@ -347,7 +500,7 @@ private struct BackupRestoreView: View {
                     showImporter = true
                 }
             } footer: {
-                Text("备份文件包含软件源列表、分类结构与设置项，不含本地缓存的 Release 正文，方便在多设备间轻量迁移。")
+                Text("备份文件包含软件源列表、多级分类结构与全部设置项，方便在多设备间轻量迁移。")
             }
         }
         .navigationTitle("备份与还原")
@@ -407,8 +560,8 @@ private struct AboutAndLogsView: View {
         List {
             Section("关于") {
                 LabeledContent("应用名称", value: "OpenSource Hub")
-                LabeledContent("版本", value: "1.0.0 (iOS 独立版)")
-                LabeledContent("架构", value: "纯 SwiftUI + 系统 SQLite3")
+                LabeledContent("版本", value: "2.0.0 (iOS 独立版)")
+                LabeledContent("架构", value: "纯 SwiftUI + WebKit + 系统 SQLite3")
             }
 
             Section("最近同步日志") {

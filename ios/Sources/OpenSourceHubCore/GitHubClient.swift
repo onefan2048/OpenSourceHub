@@ -313,3 +313,15 @@ struct GhLabelDTO: Decodable, Sendable {
 struct GhPullRequestMarker: Decodable, Sendable {
     let url: String?
 }
+
+struct GhIssueCommentDTO: Decodable, Sendable {
+    let id: Int64
+    let user: GhUserDTO?
+    let body: String?
+    let created_at: String
+}
+
+struct GhSingleCommitDTO: Decodable, Sendable {
+    let sha: String
+    let commit: GhCommitDetail
+}

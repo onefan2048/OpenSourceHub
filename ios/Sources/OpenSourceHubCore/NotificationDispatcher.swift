@@ -117,12 +117,38 @@ public enum NotificationDispatcher {
                     ])
                 }
             }
+
+            // 8. Email (SMTP TLS / STARTTLS / Outlook OAuth2)
+            let smtpConfig = SMTPClient.Config.from(settings: settings)
+            if smtpConfig.isConfigured {
+                await sendChannel(store: store, item: item, channel: "email") {
+                    let bodyText = "软件源：\(item.repoFullName)\n更新：\(item.title)\(item.body.map { "\n\($0)" } ?? "")\(item.url.map { "\n链接：\($0)" } ?? "")"
+                    try await SMTPClient.send(
+                        config: smtpConfig,
+                        subject: "[OpenSource Hub] \(item.repoFullName) \(item.title)",
+                        body: bodyText,
+                        onRefreshTokenRotated: { newToken in
+                            store.setSetting("notify.email.outlook.refreshToken", value: newToken)
+                        }
+                    )
+                }
+            }
         }
     }
 
-    public static func sendTest(channel: String, settings: [String: String]) async throws {
+    public static func sendTest(channel: String, settings: [String: String], store: SQLiteStore? = nil) async throws {
         let text = "OpenSource Hub iOS 测试通知（\(ISO8601DateFormatter().string(from: Date()))）"
         switch channel {
+        case "email":
+            let cfg = SMTPClient.Config.from(settings: settings)
+            try await SMTPClient.send(
+                config: cfg,
+                subject: "[OpenSource Hub] 测试邮件通知",
+                body: text,
+                onRefreshTokenRotated: { newToken in
+                    store?.setSetting("notify.email.outlook.refreshToken", value: newToken)
+                }
+            )
         case "telegram":
             let token = settings["notify.telegram.botToken"] ?? ""
             let chat = settings["notify.telegram.chatId"] ?? ""

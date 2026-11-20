@@ -9,6 +9,7 @@ final class AppStore: ObservableObject {
 
     @Published var repos: [RepositoryItem] = []
     @Published var categories: [CategoryItem] = []
+    @Published var categoryTree: [CategoryTreeNode] = []
     @Published var notifications: [NotificationItem] = []
     @Published var stats: HubStats = .empty
     @Published var settings: [String: String] = HubSettings.defaults
@@ -23,6 +24,14 @@ final class AppStore: ObservableObject {
     @Published var selectedCategoryId: Int64? = nil // nil = all, -1 = uncategorized
 
     private var autoPollTask: Task<Void, Never>?
+
+    var preferredColorScheme: ColorScheme? {
+        switch settings["ui.theme"] {
+        case "light": return .light
+        case "dark": return .dark
+        default: return nil
+        }
+    }
 
     init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -44,9 +53,15 @@ final class AppStore: ObservableObject {
     func reloadAll() {
         repos = store.listRepositories()
         categories = store.listCategories()
-        notifications = store.listNotifications(limit: 120)
+        categoryTree = CategoryTree.build(categories: categories, repos: repos)
+        notifications = store.listNotifications(limit: 200)
         stats = store.getStats()
         settings = store.getAllSettings()
+    }
+
+    func categoryPath(for categoryId: Int64?) -> String? {
+        guard let cid = categoryId else { return nil }
+        return categoryTree.first(where: { $0.id == cid })?.path
     }
 
     func showToast(_ message: String) {
@@ -152,27 +167,51 @@ final class AppStore: ObservableObject {
             reloadAll()
         }
 
+        let concurrency = max(1, min(6, store.getIntSetting("worker.concurrency", fallback: 2)))
         var okCount = 0
-        for (idx, repo) in targets.enumerated() {
-            syncProgressText = "正在同步 (\(idx + 1)/\(targets.count)) \(repo.name)"
-            syncingRepoIds.insert(repo.id)
-            let (res, rl) = await SyncEngine.syncRepository(
-                store: store,
-                repoId: repo.id,
-                trigger: onlyDue ? "schedule" : "batch",
-                full: false,
-                onLocalNotify: { title, body, _ in
-                    Self.postLocalNotification(title: title, body: body)
+        var completed = 0
+        var nextIndex = 0
+        let total = targets.count
+        let dbStore = store
+
+        await withTaskGroup(of: (Int64, SyncResult, RateLimitInfo).self) { group in
+            func enqueueNext() {
+                guard nextIndex < targets.count else { return }
+                let repo = targets[nextIndex]
+                nextIndex += 1
+                syncingRepoIds.insert(repo.id)
+                syncProgressText = "正在同步 (\(completed)/\(total)) \(repo.name)"
+                group.addTask {
+                    let (res, rl) = await SyncEngine.syncRepository(
+                        store: dbStore,
+                        repoId: repo.id,
+                        trigger: onlyDue ? "schedule" : "batch",
+                        full: false,
+                        onLocalNotify: { title, body, _ in
+                            Self.postLocalNotification(title: title, body: body)
+                        }
+                    )
+                    return (repo.id, res, rl)
                 }
-            )
-            syncingRepoIds.remove(repo.id)
-            if rl.remaining != nil || rl.limit != nil { rateLimit = rl }
-            if res.ok { okCount += 1 }
-            reloadAll()
+            }
+
+            for _ in 0..<min(concurrency, total) {
+                enqueueNext()
+            }
+
+            for await (repoId, res, rl) in group {
+                syncingRepoIds.remove(repoId)
+                completed += 1
+                if res.ok { okCount += 1 }
+                if rl.remaining != nil || rl.limit != nil { rateLimit = rl }
+                syncProgressText = "正在同步 (\(completed)/\(total))"
+                reloadAll()
+                enqueueNext()
+            }
         }
 
         if !onlyDue {
-            showToast("已完成同步 \(okCount)/\(targets.count) 个软件源")
+            showToast("已完成同步 \(okCount)/\(total) 个软件源")
         }
     }
 
@@ -180,7 +219,7 @@ final class AppStore: ObservableObject {
         autoPollTask?.cancel()
         autoPollTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 60_000_000_000) // Check every 60s in foreground
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
                 guard let self = self, !Task.isCancelled else { break }
                 if !self.isSyncingAll {
                     await self.syncAll(onlyDue: true)
@@ -189,12 +228,19 @@ final class AppStore: ObservableObject {
         }
     }
 
-    // MARK: - Categories & Settings
+    // MARK: - Multi-level Categories & Settings
 
-    func createCategory(name: String) {
+    func createCategory(name: String, parentId: Int64? = nil) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        store.createCategory(name: trimmed)
+        store.createCategory(name: trimmed, parentId: parentId)
+        reloadAll()
+    }
+
+    func updateCategory(id: Int64, name: String, parentId: Int64?) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        store.updateCategory(id: id, name: trimmed, parentId: parentId)
         reloadAll()
     }
 
@@ -220,6 +266,11 @@ final class AppStore: ObservableObject {
         store.clearHttpCache()
         reloadAll()
         showToast("已清理 HTTP ETag 缓存")
+    }
+
+    func markNotificationsRead(ids: [Int64]) {
+        store.markNotificationsRead(ids: ids)
+        reloadAll()
     }
 
     func markAllNotificationsRead() {
