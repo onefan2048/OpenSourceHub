@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 import OpenSourceHubCore
 
@@ -483,45 +484,122 @@ private struct BackupRestoreView: View {
 
     var body: some View {
         Form {
-            Section {
-                Button("导出配置与软件源列表 (JSON)") {
+            Section("导出备份") {
+                Button {
                     do {
                         let data = try app.store.exportBackupJSON()
                         let url = FileManager.default.temporaryDirectory.appendingPathComponent("OpenSourceHub-Backup.json")
-                        try data.write(to: url)
+                        try data.write(to: url, options: .atomic)
                         shareURL = url
                     } catch {
                         app.showToast("导出失败: \(error.localizedDescription)")
                     }
+                } label: {
+                    Label("导出配置与软件源列表 (JSON)", systemImage: "square.and.arrow.up")
+                        .foregroundStyle(HubTheme.accent)
                 }
-                .foregroundStyle(HubTheme.accent)
 
-                Button("从 JSON 文件还原") {
-                    showImporter = true
+                Button {
+                    do {
+                        let data = try app.store.exportBackupJSON()
+                        UIPasteboard.general.string = String(data: data, encoding: .utf8)
+                        app.showToast("已复制备份 JSON 到剪贴板")
+                    } catch {
+                        app.showToast("复制失败: \(error.localizedDescription)")
+                    }
+                } label: {
+                    Label("复制备份 JSON 到剪贴板", systemImage: "doc.on.doc")
+                        .foregroundStyle(HubTheme.accent)
                 }
+            }
+
+            Section {
+                Button {
+                    showImporter = true
+                } label: {
+                    Label("从本地 JSON 文件还原…", systemImage: "folder.badge.plus")
+                        .foregroundStyle(HubTheme.accent)
+                }
+
+                Button {
+                    guard let text = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !text.isEmpty,
+                          let data = text.data(using: .utf8) else {
+                        app.showToast("剪贴板中没有 JSON 内容")
+                        return
+                    }
+                    do {
+                        let count = try app.store.importBackupJSON(data)
+                        app.reloadAll()
+                        app.showToast("已从剪贴板还原（新增 \(count) 个软件源）")
+                    } catch {
+                        app.showToast("剪贴板 JSON 解析失败: \(error.localizedDescription)")
+                    }
+                } label: {
+                    Label("从剪贴板 JSON 还原", systemImage: "doc.on.clipboard")
+                }
+            } header: {
+                Text("还原备份")
             } footer: {
-                Text("备份文件包含软件源列表、多级分类结构与全部设置项，方便在多设备间轻量迁移。")
+                Text("备份文件包含软件源列表、多级分类结构与全部设置项，支持直接从「文件」App 任意目录或剪贴板导入。")
             }
         }
         .navigationTitle("备份与还原")
         .sheet(isPresented: Binding(get: { shareURL != nil }, set: { if !$0 { shareURL = nil } })) {
             if let u = shareURL { ShareSheet(items: [u]) }
         }
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.json]) { result in
-            switch result {
-            case let .success(url):
-                let granted = url.startAccessingSecurityScopedResource()
-                defer { if granted { url.stopAccessingSecurityScopedResource() } }
-                do {
-                    let data = try Data(contentsOf: url)
-                    let count = try app.store.importBackupJSON(data)
-                    app.reloadAll()
-                    app.showToast("已导入 \(count) 个新软件源")
-                } catch {
-                    app.showToast("导入失败: \(error.localizedDescription)")
+        .sheet(isPresented: $showImporter) {
+            BackupJSONDocumentPicker { result in
+                switch result {
+                case let .success(data):
+                    do {
+                        let count = try app.store.importBackupJSON(data)
+                        app.reloadAll()
+                        app.showToast("还原成功（新增 \(count) 个软件源）")
+                    } catch {
+                        app.showToast("JSON 解析失败: \(error.localizedDescription)")
+                    }
+                case let .failure(err):
+                    app.showToast("读取文件失败: \(err.localizedDescription)")
                 }
-            case let .failure(err):
-                app.showToast("选择文件失败: \(err.localizedDescription)")
+            }
+        }
+    }
+}
+
+/// Native UIDocumentPickerViewController with `asCopy: true` and broad content types `[.json, .plainText, .text, .data, .item]`
+/// so `.json` files stored in third-party signer containers or iOS Files folders are NEVER grayed out.
+private struct BackupJSONDocumentPicker: UIViewControllerRepresentable {
+    var onCompletion: (Result<Data, Error>) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onCompletion: onCompletion) }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let types: [UTType] = [.json, .plainText, .text, .data, .item]
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
+        picker.allowsMultipleSelection = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onCompletion: (Result<Data, Error>) -> Void
+
+        init(onCompletion: @escaping (Result<Data, Error>) -> Void) {
+            self.onCompletion = onCompletion
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            guard let url = urls.first else { return }
+            let granted = url.startAccessingSecurityScopedResource()
+            defer { if granted { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let data = try Data(contentsOf: url)
+                onCompletion(.success(data))
+            } catch {
+                onCompletion(.failure(error))
             }
         }
     }

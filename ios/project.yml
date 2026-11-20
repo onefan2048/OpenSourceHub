@@ -17,6 +17,7 @@ targets:
     sources:
       - path: Sources/OpenSourceHubApp
       - path: Resources/Assets.xcassets
+      - path: Resources/LaunchScreen.storyboard
     dependencies:
       - package: OpenSourceHubCore
         product: OpenSourceHubCore
@@ -38,6 +39,7 @@ targets:
         ENABLE_BITCODE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_OPTIMIZATION: space
+        INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
       configs:
         Release:
           SWIFT_OPTIMIZATION_LEVEL: -Osize
