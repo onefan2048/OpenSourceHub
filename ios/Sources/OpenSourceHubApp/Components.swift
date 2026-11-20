@@ -380,6 +380,7 @@ struct RichMarkdownWebView: View {
     var owner: String? = nil
     var repo: String? = nil
     var branch: String? = nil
+    var onOpenRepoMarkdown: ((String) -> Void)? = nil
 
     @Environment(\.colorScheme) private var scheme
     @State private var contentHeight: CGFloat = 120
@@ -392,13 +393,22 @@ struct RichMarkdownWebView: View {
             branch: branch,
             isDark: scheme == .dark
         )
-        MarkdownWebRepresentable(html: html, height: $contentHeight)
-            .frame(height: max(60, contentHeight))
+        MarkdownWebRepresentable(
+            html: html,
+            owner: owner,
+            repo: repo,
+            onOpenRepoMarkdown: onOpenRepoMarkdown,
+            height: $contentHeight
+        )
+        .frame(height: max(60, contentHeight))
     }
 }
 
 private struct MarkdownWebRepresentable: UIViewRepresentable {
     let html: String
+    let owner: String?
+    let repo: String?
+    let onOpenRepoMarkdown: ((String) -> Void)?
     @Binding var height: CGFloat
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -418,6 +428,7 @@ private struct MarkdownWebRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ web: WKWebView, context: Context) {
+        context.coordinator.parent = self
         if context.coordinator.lastHTML != html {
             context.coordinator.lastHTML = html
             web.loadHTMLString(html, baseURL: URL(string: "https://github.com"))
@@ -445,6 +456,16 @@ private struct MarkdownWebRepresentable: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
+                if let handler = parent.onOpenRepoMarkdown,
+                   let owner = parent.owner,
+                   let repo = parent.repo,
+                   let mdPath = ReadmeLanguageParser.extractSameRepoMarkdownPath(from: url, owner: owner, repo: repo) {
+                    DispatchQueue.main.async {
+                        handler(mdPath)
+                    }
+                    decisionHandler(.cancel)
+                    return
+                }
                 UIApplication.shared.open(url)
                 decisionHandler(.cancel)
                 return
@@ -454,7 +475,58 @@ private struct MarkdownWebRepresentable: UIViewRepresentable {
     }
 }
 
-// MARK: - Add Repo Sheet (Single & Batch with Multi-level Category Picker)
+// MARK: - Quick Create Category Sheet (Used when importing or editing a repo)
+
+struct QuickCreateCategorySheet: View {
+    @EnvironmentObject private var app: AppStore
+    @Environment(\.dismiss) private var dismiss
+    var initialParentId: Int64? = nil
+    var onCreated: (Int64) -> Void
+
+    @State private var name = ""
+    @State private var parentId: Int64? = nil
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("新建分类") {
+                    TextField("输入分类名称（例如：AI / agent）", text: $name)
+                    Picker("上级分类（可选）", selection: $parentId) {
+                        Text("无（作为顶层分类）").tag(Int64?.none)
+                        ForEach(app.categoryTree) { node in
+                            Text(node.pickerLabel).tag(Optional(node.id))
+                        }
+                    }
+                }
+            }
+            .navigationTitle("新建分类")
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                if let p = initialParentId, p > 0 {
+                    parentId = p
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("创建并选中") {
+                        if let newId = app.createCategory(name: name, parentId: parentId) {
+                            onCreated(newId)
+                            dismiss()
+                        }
+                    }
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
+// MARK: - Add Repo Sheet (Single & Batch with Multi-level Category Picker + Inline New Category)
 
 struct AddRepoSheet: View {
     @EnvironmentObject private var app: AppStore
@@ -463,6 +535,7 @@ struct AddRepoSheet: View {
 
     @State private var inputText = ""
     @State private var selectedCategoryId: Int64? = nil
+    @State private var showingNewCategorySheet = false
     @State private var submitting = false
     @State private var errorMessages: [String] = []
 
@@ -487,6 +560,13 @@ struct AddRepoSheet: View {
                             Text(node.pickerLabel).tag(Optional(node.id))
                         }
                     }
+                    Button {
+                        showingNewCategorySheet = true
+                    } label: {
+                        Label("+ 新建分类…", systemImage: "folder.badge.plus")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(HubTheme.accent)
+                    }
                 }
 
                 if !errorMessages.isEmpty {
@@ -504,6 +584,11 @@ struct AddRepoSheet: View {
             .onAppear {
                 if let def = defaultCategoryId, def > 0 {
                     selectedCategoryId = def
+                }
+            }
+            .sheet(isPresented: $showingNewCategorySheet) {
+                QuickCreateCategorySheet(initialParentId: selectedCategoryId) { newId in
+                    selectedCategoryId = newId
                 }
             }
             .toolbar {

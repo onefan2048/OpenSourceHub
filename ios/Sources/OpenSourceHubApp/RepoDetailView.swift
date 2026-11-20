@@ -55,6 +55,13 @@ struct RepoDetailView: View {
     @State private var selectedDiscussion: DiscussionItem?
     @State private var shareURL: URL?
     @State private var confirmDelete = false
+    @State private var showingNewCategorySheet = false
+
+    // Requirement 3: Multi-language in-app README switcher state
+    @State private var activeReadmePath: String? = nil // nil = default README
+    @State private var activeReadmeContent: String? = nil
+    @State private var loadingReadmeVariant = false
+    @State private var autoSelectedChineseForRepoId: Int64? = nil
 
     private var repo: RepositoryItem? {
         app.repos.first(where: { $0.id == repoId }) ?? app.store.getRepository(id: repoId)
@@ -269,29 +276,53 @@ struct RepoDetailView: View {
         }
     }
 
-    // MARK: - Requirement 7: Overview Tab (Languages + 源码与目录 + Changelog + Rich README)
+    // MARK: - Requirement 2 & 3 & 7: Overview Tab (Languages + 源码与目录 w/ Zread/DeepWiki + Changelog + Multi-language README)
 
     private func overviewTab(_ repo: RepositoryItem) -> some View {
         let branch = repo.defaultBranch ?? "main"
+        let variants = ReadmeLanguageParser.extractVariants(
+            readme: repo.readme ?? "",
+            owner: repo.owner,
+            repo: repo.name,
+            branch: repo.defaultBranch,
+            rootTree: repo.rootTree
+        )
+        let preferChinese = app.settings["readme.preferChinese"] != "false"
+        let displayedReadme = activeReadmeContent ?? repo.readme ?? ""
+        let githubReadmeUrlStr: String = {
+            if let path = activeReadmePath {
+                return "https://github.com/\(repo.owner)/\(repo.name)/blob/\(branch)/\(path)"
+            }
+            return repo.htmlUrl
+        }()
+
         return VStack(alignment: .leading, spacing: 14) {
             // 1. Languages 语言
             if !repo.languages.isEmpty {
                 LanguageBarView(languages: repo.languages)
             }
 
-            // 2. 源码与目录
+            // 2. 源码与目录 (GitHub 仓库 + Zread 文档 + DeepWiki 文档 + Source ZIP + Source TAR.GZ)
             VStack(alignment: .leading, spacing: 10) {
                 Text("源码与目录").font(.headline)
 
-                HStack(spacing: 8) {
-                    if let repoUrl = URL(string: repo.htmlUrl) {
-                        sourceLinkPill("GitHub 仓库", url: repoUrl)
-                    }
-                    if let zipUrl = URL(string: "https://github.com/\(repo.owner)/\(repo.name)/archive/refs/heads/\(branch).zip") {
-                        sourceLinkPill("Source ZIP", url: zipUrl)
-                    }
-                    if let tarUrl = URL(string: "https://github.com/\(repo.owner)/\(repo.name)/archive/refs/heads/\(branch).tar.gz") {
-                        sourceLinkPill("Source TAR.GZ", url: tarUrl)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        if let repoUrl = URL(string: repo.htmlUrl) {
+                            sourceLinkPill("GitHub 仓库", url: repoUrl)
+                        }
+                        if let zreadUrl = URL(string: "https://zread.ai/\(repo.owner)/\(repo.name)") {
+                            sourceLinkPill("Zread 文档", url: zreadUrl)
+                        }
+                        if let deepwikiUrl = URL(string: "https://deepwiki.com/\(repo.owner)/\(repo.name)") {
+                            sourceLinkPill("DeepWiki 文档", url: deepwikiUrl)
+                        }
+                        if let zipUrl = URL(string: "https://github.com/\(repo.owner)/\(repo.name)/archive/refs/heads/\(branch).zip") {
+                            sourceLinkPill("Source ZIP", url: zipUrl)
+                        }
+                        if let tarUrl = URL(string: "https://github.com/\(repo.owner)/\(repo.name)/archive/refs/heads/\(branch).tar.gz") {
+                            sourceLinkPill("Source TAR.GZ", url: tarUrl)
+                        }
                     }
                 }
 
@@ -350,15 +381,116 @@ struct RepoDetailView: View {
                 .hubCard()
             }
 
-            // 4. README (Full Markdown + HTML + Math + <picture srcset> fix)
+            // 4. README (In-App Multi-Language Switcher + Prefer Chinese + Full Markdown/HTML/Math)
             VStack(alignment: .leading, spacing: 10) {
-                Text("README").font(.headline)
-                if let readme = repo.readme, !readme.isEmpty {
+                HStack(spacing: 8) {
+                    Text("README").font(.headline)
+                    if let path = activeReadmePath {
+                        Text(path)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.secondary.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .lineLimit(1)
+                    }
+                    if loadingReadmeVariant {
+                        ProgressView().scaleEffect(0.75).tint(HubTheme.accent)
+                    }
+                    Spacer()
+                    Button {
+                        let nextVal = !preferChinese
+                        app.saveSetting("readme.preferChinese", value: nextVal ? "true" : "false")
+                        if nextVal {
+                            autoSelectChineseIfNeeded(repo: repo, variants: variants, force: true)
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: preferChinese ? "checkmark.square.fill" : "square")
+                                .foregroundStyle(preferChinese ? HubTheme.accent : .secondary)
+                            Text("优先中文")
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    if let ghUrl = URL(string: githubReadmeUrlStr) {
+                        Button {
+                            openURL(ghUrl)
+                        } label: {
+                            HStack(spacing: 2) {
+                                Text("在 GitHub 查看")
+                                Image(systemName: "arrow.up.right.square")
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                if activeReadmePath != nil {
+                    Button {
+                        activeReadmePath = nil
+                        activeReadmeContent = nil
+                    } label: {
+                        Label("返回默认 README", systemImage: "arrow.left")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(HubTheme.accent)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(HubTheme.accentSoft)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                // Multi-language switcher bar
+                if !variants.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "globe")
+                                Text("语言")
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.trailing, 2)
+
+                            readmeLangChip(title: "默认 (README.md)", active: activeReadmePath == nil) {
+                                activeReadmePath = nil
+                                activeReadmeContent = nil
+                            }
+                            ForEach(variants) { v in
+                                readmeLangChip(
+                                    title: v.label,
+                                    active: activeReadmePath?.lowercased() == v.path.lowercased()
+                                ) {
+                                    switchToReadmeVariant(path: v.path, repo: repo)
+                                }
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+
+                if !displayedReadme.isEmpty {
                     RichMarkdownWebView(
-                        markdown: readme,
+                        markdown: displayedReadme,
                         owner: repo.owner,
                         repo: repo.name,
-                        branch: repo.defaultBranch
+                        branch: repo.defaultBranch,
+                        onOpenRepoMarkdown: { mdPath in
+                            let lower = mdPath.lowercased()
+                            if lower == "readme.md" || lower == "readme.markdown" {
+                                activeReadmePath = nil
+                                activeReadmeContent = nil
+                            } else {
+                                switchToReadmeVariant(path: mdPath, repo: repo)
+                            }
+                        }
                     )
                 } else {
                     Text("暂未获取到 README 内容，请先同步。")
@@ -367,6 +499,56 @@ struct RepoDetailView: View {
                 }
             }
             .hubCard()
+            .onAppear {
+                autoSelectChineseIfNeeded(repo: repo, variants: variants, force: false)
+            }
+            .onChange(of: repo.readmeSha) { _ in
+                autoSelectChineseIfNeeded(repo: repo, variants: variants, force: false)
+            }
+        }
+    }
+
+    private func readmeLangChip(title: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(active ? .white : .primary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(active ? HubTheme.accent : Color.secondary.opacity(0.12))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func autoSelectChineseIfNeeded(repo: RepositoryItem, variants: [ReadmeVariant], force: Bool) {
+        let preferChinese = app.settings["readme.preferChinese"] != "false"
+        guard preferChinese else { return }
+        if !force {
+            guard autoSelectedChineseForRepoId != repo.id else { return }
+        }
+        autoSelectedChineseForRepoId = repo.id
+        if let zh = variants.first(where: { ReadmeLanguageParser.isSimplifiedChinese(label: $0.label, path: $0.path) })
+            ?? variants.first(where: { $0.isChinese }) {
+            switchToReadmeVariant(path: zh.path, repo: repo)
+        }
+    }
+
+    private func switchToReadmeVariant(path: String, repo: RepositoryItem) {
+        let clean = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        activeReadmePath = clean
+        loadingReadmeVariant = true
+        let store = app.store
+        Task {
+            do {
+                let text = try await SyncEngine.fetchRepoFileText(store: store, repo: repo, path: clean)
+                if activeReadmePath == clean {
+                    activeReadmeContent = text
+                }
+            } catch {
+                app.showToast("加载 \(clean) 失败: \(error.localizedDescription)")
+            }
+            loadingReadmeVariant = false
         }
     }
 
@@ -924,6 +1106,20 @@ struct RepoDetailView: View {
                     Text("未分类").tag(Int64?.none)
                     ForEach(app.categoryTree) { node in
                         Text(node.pickerLabel).tag(Optional(node.id))
+                    }
+                }
+                Button {
+                    showingNewCategorySheet = true
+                } label: {
+                    Label("+ 新建分类…", systemImage: "folder.badge.plus")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(HubTheme.accent)
+                }
+                .sheet(isPresented: $showingNewCategorySheet) {
+                    QuickCreateCategorySheet(initialParentId: repo.categoryId) { newId in
+                        var copy = repo
+                        copy.categoryId = newId
+                        app.updateRepo(copy)
                     }
                 }
 

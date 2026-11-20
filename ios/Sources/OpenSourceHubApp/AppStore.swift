@@ -244,11 +244,13 @@ final class AppStore: ObservableObject {
 
     // MARK: - Multi-level Categories & Settings
 
-    func createCategory(name: String, parentId: Int64? = nil) {
+    @discardableResult
+    func createCategory(name: String, parentId: Int64? = nil) -> Int64? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        store.createCategory(name: trimmed, parentId: parentId)
+        guard !trimmed.isEmpty else { return nil }
+        let newId = store.createCategory(name: trimmed, parentId: parentId)
         reloadAll()
+        return newId
     }
 
     func updateCategory(id: Int64, name: String, parentId: Int64?) {

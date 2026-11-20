@@ -465,6 +465,7 @@ public enum HubSettings {
 
     public static let defaults: [String: String] = [
         "ui.theme": "system", // system | light | dark
+        "readme.preferChinese": "true",
         "poll.defaultIntervalMinutes": "60",
         "sync.initialCommitCount": "30",
         "sync.maxReleasePages": "20",

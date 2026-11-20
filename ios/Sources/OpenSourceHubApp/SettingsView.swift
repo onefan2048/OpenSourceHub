@@ -94,7 +94,7 @@ struct SettingsView: View {
                         settingsCardRow(
                             icon: "info.circle.fill",
                             title: "关于与同步日志",
-                            subtitle: "OpenSource Hub iOS 2.0.0 · 原生独立离线版"
+                            subtitle: "OpenSource Hub iOS 3.0.0 · 原生独立离线版"
                         )
                     }
                     .buttonStyle(.plain)
@@ -560,7 +560,7 @@ private struct AboutAndLogsView: View {
         List {
             Section("关于") {
                 LabeledContent("应用名称", value: "OpenSource Hub")
-                LabeledContent("版本", value: "2.0.0 (iOS 独立版)")
+                LabeledContent("版本", value: "3.0.0 (iOS 独立版)")
                 LabeledContent("架构", value: "纯 SwiftUI + WebKit + 系统 SQLite3")
             }
 

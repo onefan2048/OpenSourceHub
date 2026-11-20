@@ -5,7 +5,7 @@ import Foundation
 /// `<picture><source media="(prefers-color-scheme: dark)" srcset="...">`) to GitHub raw/blob URLs,
 /// preventing broken localhost requests in dark mode.
 public enum MarkdownHTMLBuilder {
-    public static func resolveURL(_ rawUrl: String, owner: String?, repo: String?, branch: String?, isRawAsset: Bool) -> String {
+    public static func resolveURL(_ rawUrl: String, owner: String?, repo: String?, branch: String?, baseDir: String? = nil, isRawAsset: Bool) -> String {
         let u = rawUrl.trimmingCharacters(in: .whitespacesAndNewlines)
         if u.isEmpty || u.hasPrefix("#") || u.lowercased().hasPrefix("http://") || u.lowercased().hasPrefix("https://") || u.lowercased().hasPrefix("mailto:") || u.lowercased().hasPrefix("data:") {
             return u
@@ -13,12 +13,32 @@ public enum MarkdownHTMLBuilder {
         if u.hasPrefix("//") { return "https:\(u)" }
         guard let owner = owner, let repo = repo, !owner.isEmpty, !repo.isEmpty else { return u }
         let br = (branch?.isEmpty == false) ? branch! : "HEAD"
-        let clean = u.hasPrefix("./") ? String(u.dropFirst(2)) : (u.hasPrefix("/") ? String(u.dropFirst()) : u)
+        let clean: String
+        if u.hasPrefix("/") {
+            clean = String(u.dropFirst())
+        } else if let dir = baseDir, !dir.isEmpty, (u.hasPrefix("../") || u.hasPrefix("./")) {
+            clean = normalizeRelativePath(baseDir: dir, rel: u)
+        } else {
+            clean = u.hasPrefix("./") ? String(u.dropFirst(2)) : u
+        }
         if isRawAsset {
             return "https://raw.githubusercontent.com/\(owner)/\(repo)/\(br)/\(clean)"
         } else {
             return "https://github.com/\(owner)/\(repo)/blob/\(br)/\(clean)"
         }
+    }
+
+    private static func normalizeRelativePath(baseDir: String, rel: String) -> String {
+        var stack = baseDir.split(separator: "/").map(String.init).filter { !$0.isEmpty }
+        for part in rel.split(separator: "/").map(String.init) {
+            if part == "." || part.isEmpty { continue }
+            if part == ".." {
+                if !stack.isEmpty { stack.removeLast() }
+            } else {
+                stack.append(part)
+            }
+        }
+        return stack.joined(separator: "/")
     }
 
     public static func rewriteSrcSet(_ srcset: String, owner: String?, repo: String?, branch: String?) -> String {

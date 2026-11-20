@@ -5,7 +5,7 @@ IOS_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$IOS_DIR/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build/ios"
 DIST_DIR="$ROOT_DIR/dist"
-VERSION="2.0.0"
+VERSION="3.0.0"
 IPA_NAME="OpenSourceHub-iOS-${VERSION}-unsigned.ipa"
 
 mkdir -p "$BUILD_DIR" "$DIST_DIR"

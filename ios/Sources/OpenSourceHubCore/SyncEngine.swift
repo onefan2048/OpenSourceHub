@@ -688,6 +688,24 @@ public enum SyncEngine {
         return (body, comments)
     }
 
+    /// Fetch raw text of any repository markdown/doc file (cached in SQLite http_cache for instant language switching)
+    public static func fetchRepoFileText(store: SQLiteStore, repo: RepositoryItem, path: String) async throws -> String {
+        let cleanPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let cacheKey = "raw:\(repo.owner.lowercased())/\(repo.name.lowercased())/\(repo.defaultBranch ?? "HEAD")/\(cleanPath)"
+        if let cached = store.getHttpCache(key: cacheKey),
+           Date().timeIntervalSince(cached.updatedAt) < 3600 {
+            return cached.body
+        }
+        let encodedPath = cleanPath.split(separator: "/").map {
+            String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0)
+        }.joined(separator: "/")
+        let gh = GitHubClient(store: store, token: store.getSetting("github.token"))
+        let text = try await gh.requestRawText(path: "/repos/\(repo.owner)/\(repo.name)/contents/\(encodedPath)")
+        let trimmed = String(text.prefix(160_000))
+        store.setHttpCache(HttpCacheEntry(key: cacheKey, etag: nil, lastModified: nil, body: trimmed, linkHeader: nil, updatedAt: Date()))
+        return trimmed
+    }
+
     private static func logSync(store: SQLiteStore, repoId: Int64, trigger: String, mode: String, result: SyncResult, gh: GitHubClient, start: Date) {
         store.insertSyncLog(SyncLogItem(
             id: 0,
