@@ -120,19 +120,30 @@ public enum SMTPClient {
 
         defer { conn.cancel() }
 
+        final class OnceFlag: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            func tryAcquire() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                if done { return false }
+                done = true
+                return true
+            }
+        }
+
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            var resumed = false
+            let once = OnceFlag()
             conn.stateUpdateHandler = { state in
-                guard !resumed else { return }
                 switch state {
                 case .ready:
-                    resumed = true
+                    guard once.tryAcquire() else { return }
                     cont.resume()
                 case let .failed(err):
-                    resumed = true
+                    guard once.tryAcquire() else { return }
                     cont.resume(throwing: NSError(domain: "SMTPClient", code: 5, userInfo: [NSLocalizedDescriptionKey: "连接 SMTP 失败: \(err.localizedDescription)"]))
                 case .cancelled:
-                    resumed = true
+                    guard once.tryAcquire() else { return }
                     cont.resume(throwing: NSError(domain: "SMTPClient", code: 6, userInfo: [NSLocalizedDescriptionKey: "SMTP 连接已取消"]))
                 default:
                     break
@@ -140,8 +151,7 @@ public enum SMTPClient {
             }
             conn.start(queue: queue)
             queue.asyncAfter(deadline: .now() + 15) {
-                guard !resumed else { return }
-                resumed = true
+                guard once.tryAcquire() else { return }
                 conn.cancel()
                 cont.resume(throwing: NSError(domain: "SMTPClient", code: 7, userInfo: [NSLocalizedDescriptionKey: "连接 SMTP 服务器超时"]))
             }

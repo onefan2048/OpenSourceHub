@@ -175,8 +175,8 @@ final class AppStore: ObservableObject {
         let dbStore = store
 
         await withTaskGroup(of: (Int64, SyncResult, RateLimitInfo).self) { group in
-            func enqueueNext() {
-                guard nextIndex < targets.count else { return }
+            let initialBatch = min(concurrency, total)
+            for _ in 0..<initialBatch {
                 let repo = targets[nextIndex]
                 nextIndex += 1
                 syncingRepoIds.insert(repo.id)
@@ -195,10 +195,6 @@ final class AppStore: ObservableObject {
                 }
             }
 
-            for _ in 0..<min(concurrency, total) {
-                enqueueNext()
-            }
-
             for await (repoId, res, rl) in group {
                 syncingRepoIds.remove(repoId)
                 completed += 1
@@ -206,7 +202,25 @@ final class AppStore: ObservableObject {
                 if rl.remaining != nil || rl.limit != nil { rateLimit = rl }
                 syncProgressText = "正在同步 (\(completed)/\(total))"
                 reloadAll()
-                enqueueNext()
+
+                if nextIndex < targets.count {
+                    let repo = targets[nextIndex]
+                    nextIndex += 1
+                    syncingRepoIds.insert(repo.id)
+                    syncProgressText = "正在同步 (\(completed)/\(total)) \(repo.name)"
+                    group.addTask {
+                        let (res, rl) = await SyncEngine.syncRepository(
+                            store: dbStore,
+                            repoId: repo.id,
+                            trigger: onlyDue ? "schedule" : "batch",
+                            full: false,
+                            onLocalNotify: { title, body, _ in
+                                Self.postLocalNotification(title: title, body: body)
+                            }
+                        )
+                        return (repo.id, res, rl)
+                    }
+                }
             }
         }
 
