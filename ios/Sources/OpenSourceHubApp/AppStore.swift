@@ -11,12 +11,16 @@ final class AppStore: ObservableObject {
     @Published var categories: [CategoryItem] = []
     @Published var categoryTree: [CategoryTreeNode] = []
     @Published var notifications: [NotificationItem] = []
+    @Published var githubAccounts: [GitHubAccountItem] = []
+    @Published var accountNotifications: [AccountNotificationItem] = []
     @Published var stats: HubStats = .empty
     @Published var settings: [String: String] = HubSettings.defaults
     @Published var rateLimit: RateLimitInfo = RateLimitInfo()
 
     @Published var syncingRepoIds: Set<Int64> = []
     @Published var isSyncingAll: Bool = false
+    @Published var isSyncingAccounts: Bool = false
+    @Published var isCloudSyncing: Bool = false
     @Published var syncProgressText: String?
     @Published var toastMessage: String?
 
@@ -24,6 +28,9 @@ final class AppStore: ObservableObject {
     @Published var selectedCategoryId: Int64? = nil // nil = all, -1 = uncategorized
 
     private var autoPollTask: Task<Void, Never>?
+    private var bootstrappedDefaultAccount = false
+    private var lastAccountSyncAt: Date = .distantPast
+    private var lastCloudSyncAt: Date = .distantPast
 
     var preferredColorScheme: ColorScheme? {
         switch settings["ui.theme"] {
@@ -43,6 +50,7 @@ final class AppStore: ObservableObject {
             fatalError("Failed to initialize SQLite database: \(error)")
         }
         reloadAll()
+        bootstrapLegacyTokenIfNeeded()
         startForegroundAutoPoll()
     }
 
@@ -55,8 +63,23 @@ final class AppStore: ObservableObject {
         categories = store.listCategories()
         categoryTree = CategoryTree.build(categories: categories, repos: repos)
         notifications = store.listNotifications(limit: 200)
+        githubAccounts = store.listGitHubAccounts()
+        accountNotifications = store.listAccountNotifications(limit: 200)
         stats = store.getStats()
         settings = store.getAllSettings()
+    }
+
+    private func bootstrapLegacyTokenIfNeeded() {
+        guard !bootstrappedDefaultAccount, githubAccounts.isEmpty else { return }
+        bootstrappedDefaultAccount = true
+        let legacyToken = (settings["github.token"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !legacyToken.isEmpty else { return }
+        Task {
+            if let acc = try? await AccountSyncEngine.loginGitHubAccount(store: store, rawToken: legacyToken, makeDefault: true) {
+                _ = await AccountSyncEngine.syncAccountNotifications(store: store, accountId: acc.id)
+                reloadAll()
+            }
+        }
     }
 
     func categoryPath(for categoryId: Int64?) -> String? {
@@ -67,7 +90,7 @@ final class AppStore: ObservableObject {
     func showToast(_ message: String) {
         toastMessage = message
         Task {
-            try? await Task.sleep(nanoseconds: 2_600_000_000)
+            try? await Task.sleep(nanoseconds: 2_800_000_000)
             if self.toastMessage == message {
                 self.toastMessage = nil
             }
@@ -120,7 +143,111 @@ final class AppStore: ObservableObject {
         reloadAll()
     }
 
-    // MARK: - Syncing
+    // MARK: - GitHub Multi-Account & Reply Notifications
+
+    func loginGitHubAccount(token: String) async throws {
+        let acc = try await AccountSyncEngine.loginGitHubAccount(store: store, rawToken: token)
+        reloadAll()
+        let syncRes = await AccountSyncEngine.syncAccountNotifications(
+            store: store,
+            accountId: acc.id,
+            onLocalNotify: { title, body, _ in
+                Self.postLocalNotification(title: title, body: body)
+            }
+        )
+        reloadAll()
+        showToast("已登录 @\(acc.login)，同步到 \(syncRes.added) 条回复通知")
+    }
+
+    func syncAccountReplies(accountId: Int64? = nil, silent: Bool = false) async {
+        guard !isSyncingAccounts else { return }
+        isSyncingAccounts = true
+        defer {
+            isSyncingAccounts = false
+            reloadAll()
+        }
+        if let aid = accountId {
+            let res = await AccountSyncEngine.syncAccountNotifications(
+                store: store,
+                accountId: aid,
+                onLocalNotify: { title, body, _ in
+                    Self.postLocalNotification(title: title, body: body)
+                }
+            )
+            if !silent {
+                if let err = res.error {
+                    showToast("同步失败：\(err)")
+                } else {
+                    showToast("已同步，新增 \(res.added) 条回复通知")
+                }
+            }
+        } else {
+            let added = await AccountSyncEngine.syncAllAccountsNotifications(
+                store: store,
+                onLocalNotify: { title, body, _ in
+                    Self.postLocalNotification(title: title, body: body)
+                }
+            )
+            lastAccountSyncAt = Date()
+            if !silent {
+                showToast("已同步全部账号，新增 \(added) 条回复通知")
+            }
+        }
+    }
+
+    func setDefaultGitHubAccount(id: Int64) {
+        store.setDefaultGitHubAccount(id: id)
+        if let acc = store.getGitHubAccount(id: id) {
+            store.setSetting("github.token", value: acc.token)
+        }
+        reloadAll()
+        showToast("已设为默认账号")
+    }
+
+    func toggleGitHubAccountEnabled(id: Int64, enabled: Bool) {
+        store.setGitHubAccountEnabled(id: id, enabled: enabled)
+        reloadAll()
+    }
+
+    func removeGitHubAccount(id: Int64) {
+        store.deleteGitHubAccount(id: id)
+        reloadAll()
+        showToast("已退出账号")
+    }
+
+    func markAccountNotificationRead(id: Int64) {
+        store.markAccountNotificationRead(id: id)
+        reloadAll()
+    }
+
+    func markAllAccountNotificationsRead(accountId: Int64? = nil) {
+        store.markAllAccountNotificationsRead(accountId: accountId)
+        reloadAll()
+    }
+
+    // MARK: - Cloud Sync (WebDAV & GitHub Gist)
+
+    func performCloudSync(direction: String = "auto", silent: Bool = false) async {
+        guard !isCloudSyncing else { return }
+        isCloudSyncing = true
+        defer {
+            isCloudSyncing = false
+            reloadAll()
+        }
+        do {
+            let res = try await CloudBackupEngine.runCloudSync(store: store, direction: direction)
+            lastCloudSyncAt = Date()
+            if !silent {
+                showToast(res.summary)
+            }
+        } catch {
+            if !silent {
+                showToast("云同步失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: - Repo Syncing
 
     func syncRepo(id: Int64, trigger: String = "manual", full: Bool = false) async {
         guard !syncingRepoIds.contains(id) else { return }
@@ -238,6 +365,14 @@ final class AppStore: ObservableObject {
                 if !self.isSyncingAll {
                     await self.syncAll(onlyDue: true)
                 }
+                // Sync GitHub account replies every 5 minutes
+                if !self.githubAccounts.isEmpty && Date().timeIntervalSince(self.lastAccountSyncAt) >= 300 {
+                    await self.syncAccountReplies(accountId: nil, silent: true)
+                }
+                // Auto cloud sync every 10 minutes if enabled
+                if self.settings["cloud.autoSync"] == "true" && Date().timeIntervalSince(self.lastCloudSyncAt) >= 600 {
+                    await self.performCloudSync(direction: "auto", silent: true)
+                }
             }
         }
     }
@@ -291,6 +426,7 @@ final class AppStore: ObservableObject {
 
     func markAllNotificationsRead() {
         store.markAllNotificationsRead()
+        store.markAllAccountNotificationsRead()
         reloadAll()
     }
 

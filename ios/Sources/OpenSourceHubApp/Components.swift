@@ -143,6 +143,22 @@ struct RepoCardRow: View {
                 }
             }
 
+            if let note = repo.note, !note.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: "note.text")
+                        .font(.caption2)
+                        .foregroundStyle(HubTheme.accent)
+                    Text(note)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(HubTheme.accent)
+                        .lineLimit(2)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(HubTheme.accentSoft)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+
             if let err = repo.lastError, !err.isEmpty {
                 Text(err)
                     .font(.caption)
@@ -764,6 +780,67 @@ struct CategoriesSheet: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Repo Note Editor Sheet & Homepage URL Helper
+
+enum HomepageHelper {
+    static func normalizedURL(from raw: String?) -> URL? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        if raw.lowercased().hasPrefix("http://") || raw.lowercased().hasPrefix("https://") {
+            return URL(string: raw)
+        }
+        if raw.contains(".") && !raw.contains(" ") {
+            return URL(string: "https://\(raw)")
+        }
+        return nil
+    }
+}
+
+struct RepoNoteSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let repoFullName: String
+    @State var noteText: String
+    var onSave: (String?) -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextEditor(text: $noteText)
+                        .frame(minHeight: 110)
+                } header: {
+                    Text("\(repoFullName) 项目备注")
+                } footer: {
+                    Text("备注支持在软件源首页与发现页搜索，并会随数据云同步与 JSON 备份自动跨设备保存。")
+                }
+                if !noteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Section {
+                        Button("清空备注", role: .destructive) {
+                            onSave(nil)
+                            dismiss()
+                        }
+                    }
+                }
+            }
+            .navigationTitle("项目备注")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        let trimmed = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        onSave(trimmed.isEmpty ? nil : trimmed)
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 }
 

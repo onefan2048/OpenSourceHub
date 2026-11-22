@@ -56,6 +56,7 @@ struct RepoDetailView: View {
     @State private var shareURL: URL?
     @State private var confirmDelete = false
     @State private var showingNewCategorySheet = false
+    @State private var showingNoteSheet = false
 
     // Requirement 3: Multi-language in-app README switcher state
     @State private var activeReadmePath: String? = nil // nil = default README
@@ -121,6 +122,16 @@ struct RepoDetailView: View {
         .sheet(isPresented: Binding(get: { shareURL != nil }, set: { if !$0 { shareURL = nil } })) {
             if let u = shareURL { ShareSheet(items: [u]) }
         }
+        .sheet(isPresented: $showingNoteSheet) {
+            if let r = repo {
+                RepoNoteSheet(repoFullName: r.fullName, noteText: r.note ?? "") { updatedNote in
+                    var copy = r
+                    copy.note = updatedNote
+                    app.updateRepo(copy)
+                    app.showToast(updatedNote == nil ? "已清空项目备注" : "已保存项目备注")
+                }
+            }
+        }
         .confirmationDialog("确认删除此软件源及其全部本地历史？", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("删除软件源", role: .destructive) {
                 app.deleteRepo(id: repoId)
@@ -173,6 +184,30 @@ struct RepoDetailView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if let note = repo.note, !note.isEmpty {
+                Button {
+                    showingNoteSheet = true
+                } label: {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "note.text")
+                            .font(.caption)
+                            .foregroundStyle(HubTheme.accent)
+                        Text("备注：\(note)")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(HubTheme.accent)
+                            .multilineTextAlignment(.leading)
+                        Spacer()
+                        Image(systemName: "pencil")
+                            .font(.caption2)
+                            .foregroundStyle(HubTheme.accent)
+                    }
+                    .padding(10)
+                    .background(HubTheme.accentSoft)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+
             HStack(spacing: 14) {
                 Label("\(repo.stars)", systemImage: "star")
                 Label("\(repo.forks)", systemImage: "tuningfork")
@@ -182,7 +217,7 @@ struct RepoDetailView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Button {
                     Task {
                         await app.syncRepo(id: repoId, trigger: "manual", full: false)
@@ -190,7 +225,7 @@ struct RepoDetailView: View {
                     }
                 } label: {
                     Label("立即同步", systemImage: "arrow.clockwise")
-                        .font(.subheadline.weight(.semibold))
+                        .font(.caption.weight(.semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 9)
                         .background(HubTheme.accent)
@@ -204,13 +239,51 @@ struct RepoDetailView: View {
                         openURL(url)
                     } label: {
                         Label("GitHub", systemImage: "safari")
-                            .font(.subheadline.weight(.medium))
+                            .font(.caption.weight(.medium))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 9)
                             .background(HubTheme.accentSoft)
                             .foregroundStyle(HubTheme.accent)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
+                }
+
+                if let homeUrl = HomepageHelper.normalizedURL(from: repo.homepage) {
+                    Button {
+                        openURL(homeUrl)
+                    } label: {
+                        Label("官网", systemImage: "arrow.up.right.square")
+                            .font(.caption.weight(.medium))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(HubTheme.accentSoft)
+                            .foregroundStyle(HubTheme.accent)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                } else {
+                    Button {
+                        app.showToast("原 GitHub 仓库暂未填写官网地址")
+                    } label: {
+                        Text("官网开发中")
+                            .font(.caption2.weight(.medium))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.secondary.opacity(0.1))
+                            .foregroundStyle(.secondary)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                }
+
+                Button {
+                    showingNoteSheet = true
+                } label: {
+                    Label(repo.note?.isEmpty == false ? "已备注" : "备注", systemImage: "note.text.badge.plus")
+                        .font(.caption.weight(.medium))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(HubTheme.accentSoft)
+                        .foregroundStyle(HubTheme.accent)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
             }
         }

@@ -51,12 +51,13 @@ struct DiscoverView: View {
         }()
 
         let rows = app.repos.filter { r in
-            // Text search: name, owner, description, category path
+            // Text search: name, owner, description, note, category path
             if !q.isEmpty {
                 let catPath = app.categoryPath(for: r.categoryId)?.lowercased() ?? ""
                 let match = r.name.lowercased().contains(q)
                     || r.owner.lowercased().contains(q)
                     || (r.description?.lowercased().contains(q) ?? false)
+                    || (r.note?.lowercased().contains(q) ?? false)
                     || catPath.contains(q)
                 if !match { return false }
             }

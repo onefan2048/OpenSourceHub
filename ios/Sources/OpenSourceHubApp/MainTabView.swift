@@ -22,7 +22,7 @@ struct MainTabView: View {
                     .tabItem {
                         Label("通知", systemImage: "bell.fill")
                     }
-                    .badge(app.stats.unreadNotifications)
+                    .badge(app.stats.totalUnread)
                     .tag(2)
 
                 SettingsView()

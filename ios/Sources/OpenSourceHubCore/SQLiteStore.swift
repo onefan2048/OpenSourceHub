@@ -305,9 +305,50 @@ public final class SQLiteStore: @unchecked Sendable {
         );
         """
         try exec(schema)
-        // Safe v2 column migrations for existing v1 databases
+        // Safe v2/v4 column & table migrations for existing databases
         _ = try? exec("ALTER TABLE repositories ADD COLUMN languages_json TEXT NOT NULL DEFAULT '{}';")
         _ = try? exec("ALTER TABLE repositories ADD COLUMN root_tree_json TEXT NOT NULL DEFAULT '[]';")
+        _ = try? exec("ALTER TABLE repositories ADD COLUMN note TEXT;")
+
+        let v4Tables = """
+        CREATE TABLE IF NOT EXISTS github_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            login TEXT NOT NULL UNIQUE,
+            user_id TEXT,
+            name TEXT,
+            avatar_url TEXT,
+            html_url TEXT,
+            token TEXT NOT NULL,
+            scopes TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            last_synced_at REAL,
+            last_error TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS account_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL REFERENCES github_accounts(id) ON DELETE CASCADE,
+            source_key TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            repo_full_name TEXT NOT NULL,
+            number INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT 'author',
+            actor_login TEXT,
+            actor_avatar TEXT,
+            body TEXT,
+            url TEXT NOT NULL,
+            occurred_at REAL NOT NULL,
+            read_at REAL,
+            created_at REAL NOT NULL,
+            UNIQUE(account_id, source_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_acc_notifs_occurred ON account_notifications(occurred_at DESC);
+        """
+        try exec(v4Tables)
     }
 
     private func exec(_ sql: String) throws {
@@ -499,6 +540,23 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    /// Ensures a multi-level category path like "工具 / ios" exists and returns the leaf category ID.
+    @discardableResult
+    public func ensureCategoryPath(_ rawPath: String) -> Int64? {
+        let parts = rawPath.components(separatedBy: "/").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !parts.isEmpty else { return nil }
+        var parentId: Int64? = nil
+        for name in parts {
+            let currentCats = listCategories()
+            if let found = currentCats.first(where: { $0.parentId == parentId && $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+                parentId = found.id
+            } else {
+                parentId = createCategory(name: name, parentId: parentId)
+            }
+        }
+        return parentId
+    }
+
     // MARK: - Repositories
 
     private static let repoSelectColumns = """
@@ -509,7 +567,7 @@ public final class SQLiteStore: @unchecked Sendable {
         readme, readme_sha, watched_files, poll_interval_minutes, paused, baseline_established, baseline_at,
         notify_enabled, notify_release, notify_prerelease, notify_tag, notify_commit, notify_changelog,
         last_synced_at, last_sync_status, last_sync_duration_ms, next_sync_at, consecutive_failures,
-        category_id, added_at, updated_at, languages_json, root_tree_json
+        category_id, added_at, updated_at, languages_json, root_tree_json, note
     """
 
     private func decodeLanguages(_ json: String?) -> [String: Int] {
@@ -592,6 +650,7 @@ public final class SQLiteStore: @unchecked Sendable {
             nextSyncAt: colDate(stmt, 51),
             consecutiveFailures: Int(sqlite3_column_int64(stmt, 52)),
             categoryId: colInt64(stmt, 53),
+            note: colText(stmt, 58),
             addedAt: colDate(stmt, 54) ?? Date(),
             updatedAt: colDate(stmt, 55) ?? Date()
         )
@@ -685,7 +744,7 @@ public final class SQLiteStore: @unchecked Sendable {
                 paused=?, baseline_established=?, baseline_at=?, notify_enabled=?, notify_release=?, notify_prerelease=?,
                 notify_tag=?, notify_commit=?, notify_changelog=?, last_synced_at=?, last_sync_status=?,
                 last_sync_duration_ms=?, next_sync_at=?, consecutive_failures=?, category_id=?, updated_at=?,
-                languages_json=?, root_tree_json=?
+                languages_json=?, root_tree_json=?, note=?
             WHERE id=?;
             """
             var stmt: OpaquePointer?
@@ -745,7 +804,8 @@ public final class SQLiteStore: @unchecked Sendable {
                 bindDate(stmt, 53, Date())
                 bindText(stmt, 54, encodeLanguages(repo.languages))
                 bindText(stmt, 55, encodeRootTree(repo.rootTree))
-                bindInt64(stmt, 56, repo.id)
+                bindText(stmt, 56, repo.note)
+                bindInt64(stmt, 57, repo.id)
                 sqlite3_step(stmt)
             }
             sqlite3_finalize(stmt)
@@ -1614,6 +1674,323 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    // MARK: - GitHub Multi-Account & Reply Notifications
+
+    public func listGitHubAccounts() -> [GitHubAccountItem] {
+        queue.sync {
+            var out: [GitHubAccountItem] = []
+            let sql = """
+            SELECT a.id, a.login, a.user_id, a.name, a.avatar_url, a.html_url, a.token, a.scopes,
+                   a.enabled, a.is_default, a.last_synced_at, a.last_error,
+                   (SELECT COUNT(*) FROM account_notifications n WHERE n.account_id = a.id AND n.read_at IS NULL) AS unread_cnt,
+                   (SELECT COUNT(*) FROM account_notifications n WHERE n.account_id = a.id) AS total_cnt
+            FROM github_accounts a
+            ORDER BY a.is_default DESC, a.id ASC;
+            """
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    out.append(GitHubAccountItem(
+                        id: sqlite3_column_int64(stmt, 0),
+                        login: colText(stmt, 1) ?? "",
+                        userId: colText(stmt, 2),
+                        name: colText(stmt, 3),
+                        avatarUrl: colText(stmt, 4),
+                        htmlUrl: colText(stmt, 5),
+                        token: colText(stmt, 6) ?? "",
+                        scopes: colText(stmt, 7),
+                        enabled: colBool(stmt, 8),
+                        isDefault: colBool(stmt, 9),
+                        lastSyncedAt: colDate(stmt, 10),
+                        lastError: colText(stmt, 11),
+                        unreadCount: Int(sqlite3_column_int64(stmt, 12)),
+                        totalCount: Int(sqlite3_column_int64(stmt, 13))
+                    ))
+                }
+            }
+            sqlite3_finalize(stmt)
+            return out
+        }
+    }
+
+    public func getGitHubAccount(id: Int64) -> GitHubAccountItem? {
+        listGitHubAccounts().first(where: { $0.id == id })
+    }
+
+    public func getPreferredGitHubToken() -> String {
+        let accounts = listGitHubAccounts().filter { $0.enabled && !$0.token.isEmpty }
+        if let def = accounts.first(where: { $0.isDefault }) ?? accounts.first {
+            return def.token
+        }
+        return getSetting("github.token")
+    }
+
+    @discardableResult
+    public func upsertGitHubAccount(
+        login: String,
+        userId: String?,
+        name: String?,
+        avatarUrl: String?,
+        htmlUrl: String?,
+        token: String,
+        scopes: String?,
+        enabled: Bool = true,
+        makeDefault: Bool? = nil
+    ) -> Int64 {
+        queue.sync {
+            var countStmt: OpaquePointer?
+            var count = 0
+            if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM github_accounts;", -1, &countStmt, nil) == SQLITE_OK,
+               sqlite3_step(countStmt) == SQLITE_ROW {
+                count = Int(sqlite3_column_int64(countStmt, 0))
+            }
+            sqlite3_finalize(countStmt)
+
+            let isDef = makeDefault ?? (count == 0)
+            if isDef {
+                _ = try? exec("UPDATE github_accounts SET is_default = 0;")
+            }
+
+            let now = Date()
+            var stmt: OpaquePointer?
+            let sql = """
+            INSERT INTO github_accounts(login, user_id, name, avatar_url, html_url, token, scopes, enabled, is_default, created_at, updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(login) DO UPDATE SET
+                user_id=COALESCE(excluded.user_id, github_accounts.user_id),
+                name=COALESCE(excluded.name, github_accounts.name),
+                avatar_url=COALESCE(excluded.avatar_url, github_accounts.avatar_url),
+                html_url=COALESCE(excluded.html_url, github_accounts.html_url),
+                token=excluded.token,
+                scopes=COALESCE(excluded.scopes, github_accounts.scopes),
+                enabled=excluded.enabled,
+                is_default=CASE WHEN ? THEN 1 ELSE github_accounts.is_default END,
+                last_error=NULL,
+                updated_at=excluded.updated_at;
+            """
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                bindText(stmt, 1, login)
+                bindText(stmt, 2, userId)
+                bindText(stmt, 3, name)
+                bindText(stmt, 4, avatarUrl)
+                bindText(stmt, 5, htmlUrl)
+                bindText(stmt, 6, token)
+                bindText(stmt, 7, scopes)
+                sqlite3_bind_int(stmt, 8, enabled ? 1 : 0)
+                sqlite3_bind_int(stmt, 9, isDef ? 1 : 0)
+                bindDate(stmt, 10, now)
+                bindDate(stmt, 11, now)
+                sqlite3_bind_int(stmt, 12, isDef ? 1 : 0)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+
+            var idStmt: OpaquePointer?
+            var id: Int64 = 0
+            if sqlite3_prepare_v2(db, "SELECT id FROM github_accounts WHERE login=?;", -1, &idStmt, nil) == SQLITE_OK {
+                bindText(idStmt, 1, login)
+                if sqlite3_step(idStmt) == SQLITE_ROW { id = sqlite3_column_int64(idStmt, 0) }
+            }
+            sqlite3_finalize(idStmt)
+            return id
+        }
+    }
+
+    public func setDefaultGitHubAccount(id: Int64) {
+        queue.sync {
+            _ = try? exec("UPDATE github_accounts SET is_default = 0;")
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "UPDATE github_accounts SET is_default = 1, updated_at = ? WHERE id = ?;", -1, &stmt, nil) == SQLITE_OK {
+                bindDate(stmt, 1, Date())
+                bindInt64(stmt, 2, id)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    public func setGitHubAccountEnabled(id: Int64, enabled: Bool) {
+        queue.sync {
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "UPDATE github_accounts SET enabled = ?, updated_at = ? WHERE id = ?;", -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_int(stmt, 1, enabled ? 1 : 0)
+                bindDate(stmt, 2, Date())
+                bindInt64(stmt, 3, id)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    public func updateGitHubAccountSyncResult(id: Int64, error: String?) {
+        queue.sync {
+            var stmt: OpaquePointer?
+            let sql = error == nil
+                ? "UPDATE github_accounts SET last_synced_at = ?, last_error = NULL, updated_at = ? WHERE id = ?;"
+                : "UPDATE github_accounts SET last_error = ?, updated_at = ? WHERE id = ?;"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                if let err = error {
+                    bindText(stmt, 1, err)
+                } else {
+                    bindDate(stmt, 1, Date())
+                }
+                bindDate(stmt, 2, Date())
+                bindInt64(stmt, 3, id)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    public func deleteGitHubAccount(id: Int64) {
+        queue.sync {
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM github_accounts WHERE id = ?;", -1, &stmt, nil) == SQLITE_OK {
+                bindInt64(stmt, 1, id)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+            // Ensure at least one remaining account is default
+            _ = try? exec("""
+            UPDATE github_accounts SET is_default = 1
+            WHERE id = (SELECT id FROM github_accounts ORDER BY is_default DESC, id ASC LIMIT 1)
+              AND NOT EXISTS (SELECT 1 FROM github_accounts WHERE is_default = 1);
+            """)
+        }
+    }
+
+    public func insertAccountNotification(_ item: AccountNotificationItem) -> Bool {
+        queue.sync {
+            var check: OpaquePointer?
+            var exists = false
+            if sqlite3_prepare_v2(db, "SELECT id FROM account_notifications WHERE account_id=? AND source_key=?;", -1, &check, nil) == SQLITE_OK {
+                bindInt64(check, 1, item.accountId)
+                bindText(check, 2, item.sourceKey)
+                exists = sqlite3_step(check) == SQLITE_ROW
+            }
+            sqlite3_finalize(check)
+            if exists { return false }
+
+            var stmt: OpaquePointer?
+            let sql = """
+            INSERT OR IGNORE INTO account_notifications(account_id, source_key, kind, repo_full_name, number, title, reason, actor_login, actor_avatar, body, url, occurred_at, created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?);
+            """
+            var inserted = false
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                bindInt64(stmt, 1, item.accountId)
+                bindText(stmt, 2, item.sourceKey)
+                bindText(stmt, 3, item.kind)
+                bindText(stmt, 4, item.repoFullName)
+                bindInt(stmt, 5, item.number)
+                bindText(stmt, 6, item.title)
+                bindText(stmt, 7, item.reason)
+                bindText(stmt, 8, item.actorLogin)
+                bindText(stmt, 9, item.actorAvatar)
+                bindText(stmt, 10, item.body)
+                bindText(stmt, 11, item.url)
+                bindDate(stmt, 12, item.occurredAt)
+                bindDate(stmt, 13, Date())
+                if sqlite3_step(stmt) == SQLITE_DONE {
+                    inserted = sqlite3_changes(db) > 0
+                }
+            }
+            sqlite3_finalize(stmt)
+            return inserted
+        }
+    }
+
+    public func hasAccountCommentNotification(accountId: Int64, repoFullName: String, number: Int) -> Bool {
+        queue.sync {
+            var stmt: OpaquePointer?
+            var found = false
+            if sqlite3_prepare_v2(db, "SELECT id FROM account_notifications WHERE account_id=? AND repo_full_name=? AND number=? LIMIT 1;", -1, &stmt, nil) == SQLITE_OK {
+                bindInt64(stmt, 1, accountId)
+                bindText(stmt, 2, repoFullName)
+                bindInt(stmt, 3, number)
+                found = sqlite3_step(stmt) == SQLITE_ROW
+            }
+            sqlite3_finalize(stmt)
+            return found
+        }
+    }
+
+    public func listAccountNotifications(accountId: Int64? = nil, kind: String? = nil, unreadOnly: Bool = false, limit: Int = 200) -> [AccountNotificationItem] {
+        queue.sync {
+            var out: [AccountNotificationItem] = []
+            var clauses: [String] = []
+            if accountId != nil { clauses.append("n.account_id = ?") }
+            if let k = kind, !k.isEmpty, k != "all" { clauses.append("n.kind = ?") }
+            if unreadOnly { clauses.append("n.read_at IS NULL") }
+            let whereClause = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
+            let sql = """
+            SELECT n.id, n.account_id, a.login, n.source_key, n.kind, n.repo_full_name, n.number, n.title,
+                   n.reason, n.actor_login, n.actor_avatar, n.body, n.url, n.occurred_at, n.read_at, n.created_at
+            FROM account_notifications n
+            LEFT JOIN github_accounts a ON a.id = n.account_id
+            \(whereClause)
+            ORDER BY n.occurred_at DESC, n.id DESC
+            LIMIT ?;
+            """
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                var idx: Int32 = 1
+                if let aid = accountId { bindInt64(stmt, idx, aid); idx += 1 }
+                if let k = kind, !k.isEmpty, k != "all" { bindText(stmt, idx, k); idx += 1 }
+                bindInt(stmt, idx, limit)
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    out.append(AccountNotificationItem(
+                        id: sqlite3_column_int64(stmt, 0),
+                        accountId: sqlite3_column_int64(stmt, 1),
+                        accountLogin: colText(stmt, 2),
+                        sourceKey: colText(stmt, 3) ?? "",
+                        kind: colText(stmt, 4) ?? "issue",
+                        repoFullName: colText(stmt, 5) ?? "",
+                        number: Int(sqlite3_column_int64(stmt, 6)),
+                        title: colText(stmt, 7) ?? "",
+                        reason: colText(stmt, 8) ?? "author",
+                        actorLogin: colText(stmt, 9),
+                        actorAvatar: colText(stmt, 10),
+                        body: colText(stmt, 11),
+                        url: colText(stmt, 12) ?? "",
+                        occurredAt: colDate(stmt, 13) ?? Date(),
+                        readAt: colDate(stmt, 14),
+                        createdAt: colDate(stmt, 15) ?? Date()
+                    ))
+                }
+            }
+            sqlite3_finalize(stmt)
+            return out
+        }
+    }
+
+    public func markAccountNotificationRead(id: Int64) {
+        queue.sync {
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "UPDATE account_notifications SET read_at = ? WHERE id = ? AND read_at IS NULL;", -1, &stmt, nil) == SQLITE_OK {
+                bindDate(stmt, 1, Date())
+                bindInt64(stmt, 2, id)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    public func markAllAccountNotificationsRead(accountId: Int64? = nil) {
+        queue.sync {
+            var stmt: OpaquePointer?
+            let sql = accountId != nil
+                ? "UPDATE account_notifications SET read_at = ? WHERE account_id = ? AND read_at IS NULL;"
+                : "UPDATE account_notifications SET read_at = ? WHERE read_at IS NULL;"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                bindDate(stmt, 1, Date())
+                if let aid = accountId { bindInt64(stmt, 2, aid) }
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
     // MARK: - Stats & Backup
 
     public func getStats() -> HubStats {
@@ -1631,6 +2008,7 @@ public final class SQLiteStore: @unchecked Sendable {
             let syncedRepos = Int(scalarInt64("SELECT COUNT(*) FROM repositories WHERE last_synced_at IS NOT NULL;"))
             let totalAssets = Int(scalarInt64("SELECT COUNT(*) FROM assets WHERE kind IN ('installer','package','archive','binary');"))
             let unread = Int(scalarInt64("SELECT COUNT(*) FROM notifications WHERE channel='web' AND read_at IS NULL;"))
+            let unreadAcc = Int(scalarInt64("SELECT COUNT(*) FROM account_notifications WHERE read_at IS NULL;"))
             let cacheBytes = scalarInt64("SELECT COALESCE(SUM(LENGTH(body)), 0) FROM http_cache;")
             let dbBytes = (try? FileManager.default.attributesOfItem(atPath: dbPath)[.size] as? Int64) ?? 0
             return HubStats(
@@ -1638,109 +2016,20 @@ public final class SQLiteStore: @unchecked Sendable {
                 syncedRepos: syncedRepos,
                 totalSoftwareAssets: totalAssets,
                 unreadNotifications: unread,
+                unreadAccountNotifications: unreadAcc,
                 databaseBytes: dbBytes,
                 cacheBytes: cacheBytes
             )
         }
     }
 
-    public func exportBackupJSON() throws -> Data {
-        let categories = listCategories()
-        let reposList = listRepositories()
-        let tree = CategoryTree.build(categories: categories, repos: reposList)
-        let catMap = Dictionary(uniqueKeysWithValues: categories.map { ($0.id, $0.name) })
-        let pathMap = Dictionary(uniqueKeysWithValues: tree.map { ($0.id, $0.path) })
-        let repos = reposList.map { r in
-            HubBackupPayload.BackupRepoEntry(
-                fullName: r.fullName,
-                categoryName: r.categoryId.flatMap { catMap[$0] },
-                categoryPath: r.categoryId.flatMap { pathMap[$0] },
-                pollIntervalMinutes: r.pollIntervalMinutes,
-                paused: r.paused,
-                notifyEnabled: r.notifyEnabled,
-                notifyRelease: r.notifyRelease,
-                notifyPrerelease: r.notifyPrerelease,
-                notifyTag: r.notifyTag,
-                notifyCommit: r.notifyCommit,
-                notifyChangelog: r.notifyChangelog,
-                watchedFiles: r.watchedFiles
-            )
-        }
-        let payload = HubBackupPayload(
-            exportedAt: Date(),
-            categories: categories,
-            repos: repos,
-            settings: getAllSettings()
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        return try encoder.encode(payload)
+    public func exportBackupJSON(passphrase: String? = nil) throws -> Data {
+        try CloudBackupEngine.exportJSONData(store: self, passphrase: passphrase)
     }
 
-    public func importBackupJSON(_ data: Data) throws -> Int {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let payload = try decoder.decode(HubBackupPayload.self, from: data)
-
-        // Restore settings
-        for (k, v) in payload.settings {
-            setSetting(k, value: v)
-        }
-
-        // Restore multi-level categories preserving parent relationships
-        var oldIdToNewId: [Int64: Int64] = [:]
-        var existingByKey: [String: Int64] = [:]
-        for c in listCategories() {
-            existingByKey["\(c.parentId ?? 0):\(c.name)"] = c.id
-        }
-        var pending = payload.categories
-        var progress = true
-        while !pending.isEmpty && progress {
-            progress = false
-            var next: [CategoryItem] = []
-            for cat in pending {
-                if let oldParent = cat.parentId, oldIdToNewId[oldParent] == nil, payload.categories.contains(where: { $0.id == oldParent }) {
-                    next.append(cat)
-                    continue
-                }
-                let mappedParent = cat.parentId.flatMap { oldIdToNewId[$0] }
-                let key = "\(mappedParent ?? 0):\(cat.name)"
-                if let existingId = existingByKey[key] {
-                    oldIdToNewId[cat.id] = existingId
-                } else {
-                    let newId = createCategory(name: cat.name, parentId: mappedParent)
-                    existingByKey[key] = newId
-                    oldIdToNewId[cat.id] = newId
-                }
-                progress = true
-            }
-            pending = next
-        }
-        let treeAfter = CategoryTree.build(categories: listCategories(), repos: [])
-        let pathToId = Dictionary(uniqueKeysWithValues: treeAfter.map { ($0.path, $0.id) })
-        let nameToId = Dictionary(listCategories().map { ($0.name, $0.id) }, uniquingKeysWith: { a, _ in a })
-
-        // Restore repos
-        var imported = 0
-        for entry in payload.repos {
-            if case let .ok(ref) = RepoParser.parse(entry.fullName) {
-                let catId = entry.categoryPath.flatMap { pathToId[$0] } ?? entry.categoryName.flatMap { nameToId[$0] }
-                if var pair = addRepository(ref, categoryId: catId) {
-                    pair.repo.pollIntervalMinutes = entry.pollIntervalMinutes
-                    pair.repo.paused = entry.paused
-                    pair.repo.notifyEnabled = entry.notifyEnabled
-                    pair.repo.notifyRelease = entry.notifyRelease
-                    pair.repo.notifyPrerelease = entry.notifyPrerelease
-                    pair.repo.notifyTag = entry.notifyTag
-                    pair.repo.notifyCommit = entry.notifyCommit
-                    pair.repo.notifyChangelog = entry.notifyChangelog
-                    pair.repo.watchedFiles = entry.watchedFiles
-                    updateRepository(pair.repo)
-                    if pair.created { imported += 1 }
-                }
-            }
-        }
-        return imported
+    @discardableResult
+    public func importBackupJSON(_ data: Data, passphrase: String? = nil) throws -> Int {
+        let res = try CloudBackupEngine.importJSONData(store: self, data: data, passphrase: passphrase)
+        return res.addedRepos
     }
 }

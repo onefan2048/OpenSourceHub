@@ -183,6 +183,7 @@ public struct RepositoryItem: Identifiable, Codable, Equatable, Sendable {
     public var nextSyncAt: Date?
     public var consecutiveFailures: Int
     public var categoryId: Int64?
+    public var note: String?
     public var addedAt: Date
     public var updatedAt: Date
 
@@ -437,10 +438,68 @@ public struct HubStats: Equatable, Sendable {
     public var syncedRepos: Int
     public var totalSoftwareAssets: Int
     public var unreadNotifications: Int
+    public var unreadAccountNotifications: Int = 0
     public var databaseBytes: Int64
     public var cacheBytes: Int64
 
-    public static let empty = HubStats(totalRepos: 0, syncedRepos: 0, totalSoftwareAssets: 0, unreadNotifications: 0, databaseBytes: 0, cacheBytes: 0)
+    public var totalUnread: Int { unreadNotifications + unreadAccountNotifications }
+
+    public static let empty = HubStats(totalRepos: 0, syncedRepos: 0, totalSoftwareAssets: 0, unreadNotifications: 0, unreadAccountNotifications: 0, databaseBytes: 0, cacheBytes: 0)
+}
+
+public struct GitHubAccountItem: Identifiable, Codable, Equatable, Sendable {
+    public var id: Int64
+    public var login: String
+    public var userId: String?
+    public var name: String?
+    public var avatarUrl: String?
+    public var htmlUrl: String?
+    public var token: String
+    public var scopes: String?
+    public var enabled: Bool
+    public var isDefault: Bool
+    public var lastSyncedAt: Date?
+    public var lastError: String?
+    public var unreadCount: Int
+    public var totalCount: Int
+
+    public var tokenMasked: String {
+        if token.isEmpty { return "" }
+        if token.count <= 8 { return "••••••" }
+        return "\(token.prefix(4))••••••\(token.suffix(4))"
+    }
+
+    public init(id: Int64, login: String, userId: String?, name: String?, avatarUrl: String?, htmlUrl: String?, token: String, scopes: String?, enabled: Bool, isDefault: Bool, lastSyncedAt: Date?, lastError: String?, unreadCount: Int = 0, totalCount: Int = 0) {
+        self.id = id; self.login = login; self.userId = userId; self.name = name; self.avatarUrl = avatarUrl
+        self.htmlUrl = htmlUrl; self.token = token; self.scopes = scopes; self.enabled = enabled; self.isDefault = isDefault
+        self.lastSyncedAt = lastSyncedAt; self.lastError = lastError; self.unreadCount = unreadCount; self.totalCount = totalCount
+    }
+}
+
+public struct AccountNotificationItem: Identifiable, Codable, Equatable, Sendable {
+    public var id: Int64
+    public var accountId: Int64
+    public var accountLogin: String?
+    public var sourceKey: String
+    public var kind: String // "issue" | "discussion"
+    public var repoFullName: String
+    public var number: Int
+    public var title: String
+    public var reason: String // "author" | "answer" | "participating"
+    public var actorLogin: String?
+    public var actorAvatar: String?
+    public var body: String?
+    public var url: String
+    public var occurredAt: Date
+    public var readAt: Date?
+    public var createdAt: Date
+
+    public init(id: Int64, accountId: Int64, accountLogin: String? = nil, sourceKey: String, kind: String, repoFullName: String, number: Int, title: String, reason: String, actorLogin: String?, actorAvatar: String?, body: String?, url: String, occurredAt: Date, readAt: Date?, createdAt: Date) {
+        self.id = id; self.accountId = accountId; self.accountLogin = accountLogin; self.sourceKey = sourceKey
+        self.kind = kind; self.repoFullName = repoFullName; self.number = number; self.title = title; self.reason = reason
+        self.actorLogin = actorLogin; self.actorAvatar = actorAvatar; self.body = body; self.url = url
+        self.occurredAt = occurredAt; self.readAt = readAt; self.createdAt = createdAt
+    }
 }
 
 public struct SyncResult: Sendable {
@@ -496,6 +555,16 @@ public enum HubSettings {
         "notify.email.password": "",
         "notify.email.outlook.clientId": "",
         "notify.email.outlook.refreshToken": "",
+        "cloud.provider": "webdav", // webdav | gist
+        "cloud.webdav.url": "",
+        "cloud.webdav.username": "",
+        "cloud.webdav.password": "",
+        "cloud.gist.token": "",
+        "cloud.gist.id": "",
+        "cloud.passphrase": "",
+        "cloud.autoSync": "false",
+        "cloud.lastSyncedAt": "",
+        "cloud.lastStatus": "",
     ]
 }
 

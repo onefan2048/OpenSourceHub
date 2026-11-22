@@ -28,6 +28,7 @@ struct ReposView: View {
             let catPath = app.categoryPath(for: repo.categoryId)?.lowercased() ?? ""
             return repo.fullName.lowercased().contains(q)
                 || (repo.description?.lowercased().contains(q) ?? false)
+                || (repo.note?.lowercased().contains(q) ?? false)
                 || (repo.latestVersion?.lowercased().contains(q) ?? false)
                 || catPath.contains(q)
                 || repo.platforms.contains(where: { $0.lowercased().contains(q) })

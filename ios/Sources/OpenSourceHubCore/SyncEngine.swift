@@ -23,7 +23,7 @@ public enum SyncEngine {
             return (SyncResult(ok: false, status: "failed", errors: ["仓库不存在"], summary: "仓库不存在"), RateLimitInfo())
         }
 
-        let token = store.getSetting("github.token")
+        let token = store.getPreferredGitHubToken()
         let gh = GitHubClient(store: store, token: token)
         let isBaseline = !repo.baselineEstablished
         let mode = (full || isBaseline) ? "full" : "incremental"
@@ -492,7 +492,7 @@ public enum SyncEngine {
         maxPages: Int? = nil,
         onProgress: (@Sendable (Int, Int) -> Void)? = nil
     ) async throws -> Int {
-        let gh = GitHubClient(store: store, token: store.getSetting("github.token"))
+        let gh = GitHubClient(store: store, token: store.getPreferredGitHubToken())
         let pagesLimit = max(1, min(20, maxPages ?? store.getIntSetting("community.pagesPerRun", fallback: 5)))
         var nextPath: String? = "/repos/\(repo.owner)/\(repo.name)/issues?state=all&sort=updated&direction=desc&per_page=50"
         var page = 0
@@ -534,7 +534,7 @@ public enum SyncEngine {
         maxPages: Int? = nil,
         onProgress: (@Sendable (Int, Int) -> Void)? = nil
     ) async throws -> Int {
-        let gh = GitHubClient(store: store, token: store.getSetting("github.token"))
+        let gh = GitHubClient(store: store, token: store.getPreferredGitHubToken())
         let pagesLimit = max(1, min(20, maxPages ?? store.getIntSetting("community.pagesPerRun", fallback: 5)))
         let query = """
         query($owner: String!, $name: String!, $after: String) {
@@ -608,7 +608,7 @@ public enum SyncEngine {
 
     /// Fetch full multi-turn comments for an Issue
     public static func fetchIssueComments(store: SQLiteStore, repo: RepositoryItem, number: Int) async throws -> [ThreadCommentItem] {
-        let gh = GitHubClient(store: store, token: store.getSetting("github.token"))
+        let gh = GitHubClient(store: store, token: store.getPreferredGitHubToken())
         let resp: GitHubResponse<[GhIssueCommentDTO]> = try await gh.request(path: "/repos/\(repo.owner)/\(repo.name)/issues/\(number)/comments?per_page=100")
         return resp.data.map { c in
             ThreadCommentItem(
@@ -625,7 +625,7 @@ public enum SyncEngine {
 
     /// Fetch full multi-turn comments and nested replies for a Discussion (GraphQL)
     public static func fetchDiscussionThread(store: SQLiteStore, repo: RepositoryItem, number: Int) async throws -> (body: String?, comments: [ThreadCommentItem]) {
-        let gh = GitHubClient(store: store, token: store.getSetting("github.token"))
+        let gh = GitHubClient(store: store, token: store.getPreferredGitHubToken())
         let query = """
         query($owner: String!, $name: String!, $number: Int!) {
           repository(owner: $owner, name: $name) {
@@ -699,7 +699,7 @@ public enum SyncEngine {
         let encodedPath = cleanPath.split(separator: "/").map {
             String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0)
         }.joined(separator: "/")
-        let gh = GitHubClient(store: store, token: store.getSetting("github.token"))
+        let gh = GitHubClient(store: store, token: store.getPreferredGitHubToken())
         let text = try await gh.requestRawText(path: "/repos/\(repo.owner)/\(repo.name)/contents/\(encodedPath)")
         let trimmed = String(text.prefix(160_000))
         store.setHttpCache(HttpCacheEntry(key: cacheKey, etag: nil, lastModified: nil, body: trimmed, linkHeader: nil, updatedAt: Date()))
